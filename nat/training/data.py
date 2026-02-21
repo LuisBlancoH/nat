@@ -496,11 +496,11 @@ class RealEpisodicDataset(Dataset):
         self.seq_len = seq_len
         self.num_problems = num_problems
 
-        # Load QA pairs from all sources
-        self.qa_pairs: list[tuple[str, str]] = []
+        # Load QA pairs grouped by source for balanced sampling
+        self.source_buckets: list[list[tuple[str, str]]] = []
         self._load_sources()
 
-        if len(self.qa_pairs) == 0:
+        if not self.source_buckets:
             raise RuntimeError(
                 "No QA pairs loaded. Check network connectivity and "
                 "dataset availability."
@@ -516,13 +516,19 @@ class RealEpisodicDataset(Dataset):
             sol_start = max(sol_start, 1)
             self.problem_spans.append((sol_start, sol_end))
 
-        logger.info(f"Loaded {len(self.qa_pairs)} QA pairs for Phase 2")
+        total = sum(len(b) for b in self.source_buckets)
+        logger.info(
+            f"Loaded {total} QA pairs across "
+            f"{len(self.source_buckets)} sources for Phase 2 "
+            f"(source-balanced sampling)"
+        )
 
     def _load_sources(self):
-        """Load QA pairs from HuggingFace datasets."""
+        """Load QA pairs from HuggingFace datasets into per-source buckets."""
         from datasets import load_dataset
 
         for src in self.SOURCES:
+            bucket: list[tuple[str, str]] = []
             try:
                 logger.info(f"Loading {src['name']} ({src['config']})...")
                 ds = load_dataset(
@@ -534,13 +540,18 @@ class RealEpisodicDataset(Dataset):
                     try:
                         q, a = src["formatter"](example)
                         if q and a:
-                            self.qa_pairs.append((q.strip(), a.strip()))
+                            bucket.append((q.strip(), a.strip()))
                     except (KeyError, IndexError, TypeError):
                         continue
-                logger.info(
-                    f"  → {src['name']}: loaded, "
-                    f"total QA pairs so far: {len(self.qa_pairs)}"
-                )
+                if bucket:
+                    self.source_buckets.append(bucket)
+                    logger.info(
+                        f"  → {src['name']}: {len(bucket)} pairs"
+                    )
+                else:
+                    logger.warning(
+                        f"  → {src['name']}: loaded but 0 valid pairs"
+                    )
             except Exception as e:
                 logger.warning(f"  → {src['name']}: failed ({e}), skipping")
 
@@ -565,7 +576,13 @@ class RealEpisodicDataset(Dataset):
 
         all_tokens: list[int] = []
 
-        selected = rng.choices(self.qa_pairs, k=self.num_problems)
+        # Source-balanced sampling: pick a random source, then a
+        # random example from it — every source gets equal weight
+        # regardless of its size.
+        selected = [
+            rng.choice(rng.choice(self.source_buckets))
+            for _ in range(self.num_problems)
+        ]
 
         for q, a in selected:
             q_tokens = self.tokenizer.encode(
