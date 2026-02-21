@@ -290,7 +290,7 @@ def build_domain_dataloader(
     tokenizer=None,
     *,
     synthetic: bool = True,
-) -> DataLoader:
+) -> DataLoader | None:
     """
     Build a ``DataLoader`` for a single domain.
 
@@ -304,7 +304,9 @@ def build_domain_dataloader(
 
     Returns
     -------
-    DataLoader
+    DataLoader or None
+        ``None`` when real data loading failed for every source
+        (the domain should be excluded from training).
     """
     if synthetic:
         sessions_per_domain = getattr(config, "sessions_per_domain_p3", 20)
@@ -515,9 +517,9 @@ def build_domain_dataloader(
     if not loaded_datasets:
         logger.warning(
             f"No sources loaded for domain '{domain}'. "
-            f"Falling back to synthetic data."
+            f"This domain will be excluded from training."
         )
-        return build_domain_dataloader(config, domain, synthetic=True)
+        return None
 
     # Build a single DomainTextDataset from the merged sources
     # Chain the iterators so DomainTextDataset sees one stream
@@ -784,6 +786,7 @@ def train_one_run(
     domain_dataloaders: dict[str, DataLoader],
     domain_iters: dict[str, Any],
     run_idx: int,
+    available_domains: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Execute one Phase 3 consolidation run.
@@ -819,7 +822,7 @@ def train_one_run(
     grad_clip = getattr(config, "grad_clip", 1.0)
 
     # Build domain sequence for this run
-    sequence = build_domain_sequence(config)
+    sequence = build_domain_sequence(config, domains=available_domains)
 
     # Reset consolidated weights to zero
     model.consolidation.W_c_A = torch.zeros_like(model.consolidation.W_c_A)
@@ -1032,8 +1035,22 @@ def train_phase3(
         dl = build_domain_dataloader(
             config, domain, tokenizer=tokenizer, synthetic=synthetic,
         )
-        domain_dataloaders[domain] = dl
-        domain_iters[domain] = iter(dl)
+        if dl is not None:
+            domain_dataloaders[domain] = dl
+            domain_iters[domain] = iter(dl)
+        else:
+            logger.warning(f"Excluding domain '{domain}' (no data loaded)")
+
+    available_domains = list(domain_dataloaders.keys())
+    if len(available_domains) < 2:
+        raise RuntimeError(
+            f"Phase 3 needs at least 2 domains but only got "
+            f"{available_domains}. Check network / dataset availability."
+        )
+    logger.info(
+        f"Phase 3 active domains ({len(available_domains)}): "
+        f"{available_domains}"
+    )
 
     # ================================================================
     # W&B
@@ -1097,6 +1114,7 @@ def train_phase3(
             domain_dataloaders,
             domain_iters,
             run_idx,
+            available_domains=available_domains,
         )
 
         running_loss += metrics["mean_loss"]
