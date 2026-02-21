@@ -206,6 +206,9 @@ def _measure_eval_only_loss(
 
     stats.elapsed_s = time.time() - t0
     return stats
+
+
+def _measure_episodic_loss(
     model, dataloader, device, n_samples: int, name: str = "episodic",
 ) -> LossStats:
     """Measure loss restricted to solution spans (Phase 2 format).
