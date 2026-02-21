@@ -124,6 +124,81 @@ class TokenChunkedDataset(IterableDataset):
                 yield {"input_ids": torch.tensor(chunk, dtype=torch.long)}
 
 
+class DocumentChunkedDataset(IterableDataset):
+    """
+    Streams text from a HuggingFace dataset, tokenises on the fly,
+    and yields **one document per episode** (no cross-document
+    concatenation).
+
+    Each document is either:
+    - Truncated to ``seq_len`` if longer, or
+    - Skipped if shorter than ``min_len`` tokens.
+
+    This preserves within-document coherence which is critical for
+    Phase 1 meta-learning: the model needs the adaptation context
+    (first 75 %) to be relevant to the evaluation context (last 25 %).
+
+    Parameters
+    ----------
+    hf_dataset
+        A HuggingFace ``IterableDataset`` (``streaming=True``).
+    tokenizer
+        A HuggingFace tokenizer.
+    seq_len : int
+        Number of tokens per episode.
+    min_len : int
+        Minimum document length in tokens.  Shorter docs are skipped.
+        Defaults to ``seq_len // 2`` (ensure at least half is real).
+    text_column : str
+        Name of the text column in the HF dataset.
+    pad_token_id : int | None
+        Token used for padding short-but-accepted documents.  If None,
+        uses ``tokenizer.eos_token_id``.
+    """
+
+    def __init__(
+        self,
+        hf_dataset,
+        tokenizer,
+        seq_len: int = 2048,
+        min_len: int | None = None,
+        text_column: str = "text",
+        pad_token_id: int | None = None,
+    ):
+        super().__init__()
+        self.hf_dataset = hf_dataset
+        self.tokenizer = tokenizer
+        self.seq_len = seq_len
+        self.min_len = min_len if min_len is not None else seq_len // 2
+        self.text_column = text_column
+        self.pad_token_id = (
+            pad_token_id
+            if pad_token_id is not None
+            else getattr(tokenizer, "eos_token_id", 0)
+        )
+
+    def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
+        for example in self.hf_dataset:
+            text = example[self.text_column]
+            tokens = self.tokenizer.encode(text, add_special_tokens=False)
+
+            if len(tokens) < self.min_len:
+                continue  # skip very short documents
+
+            if len(tokens) >= self.seq_len:
+                # Truncate — take a random window for variety
+                max_start = len(tokens) - self.seq_len
+                start = random.randint(0, max_start) if max_start > 0 else 0
+                chunk = tokens[start : start + self.seq_len]
+            else:
+                # Pad to seq_len (right-pad with pad_token_id)
+                chunk = tokens + [self.pad_token_id] * (
+                    self.seq_len - len(tokens)
+                )
+
+            yield {"input_ids": torch.tensor(chunk, dtype=torch.long)}
+
+
 # ------------------------------------------------------------------ #
 # Dataloader builders                                                  #
 # ------------------------------------------------------------------ #
@@ -178,23 +253,31 @@ def build_phase1_dataloader(
             "Install HuggingFace datasets: pip install datasets"
         ) from exc
 
-    # Load a diverse text corpus via streaming.
-    # Try sources in order; fall back if one fails (network, auth, etc.).
+    # Phase 1 meta-learning needs *within-document coherence*:
+    # the model adapts on the first 75 % of an episode and is
+    # evaluated on the last 25 %.  If those come from different
+    # documents, the adaptation signal is pure noise.
+    #
+    # We therefore:
+    #   1. Prioritise long-document corpora (Wikipedia, FineWeb-Edu)
+    #      over short-document ones (C4 averages ~500 tokens).
+    #   2. Use DocumentChunkedDataset which keeps one document per
+    #      episode (no cross-document concatenation).
     PHASE1_SOURCES = [
-        {
-            "name": getattr(config, "dataset_name", "allenai/c4"),
-            "config": getattr(config, "dataset_config", "en"),
-            "text_column": getattr(config, "text_column", "text"),
+        {   # Wikipedia: long articles (avg ~2-3K tokens), highly coherent
+            "name": "wikimedia/wikipedia",
+            "config": "20231101.en",
+            "text_column": "text",
         },
-        {   # Fallback 1: FineWeb-Edu (open, diverse, high-quality)
+        {   # FineWeb-Edu: curated educational content, long, diverse
             "name": "HuggingFaceFW/fineweb-edu",
             "config": "sample-10BT",
             "text_column": "text",
         },
-        {   # Fallback 2: Wikipedia
-            "name": "wikimedia/wikipedia",
-            "config": "20231101.en",
-            "text_column": "text",
+        {   # C4: last resort — shorter docs, cross-doc noise
+            "name": getattr(config, "dataset_name", "allenai/c4"),
+            "config": getattr(config, "dataset_config", "en"),
+            "text_column": getattr(config, "text_column", "text"),
         },
     ]
 
@@ -224,7 +307,10 @@ def build_phase1_dataloader(
             "Check network connectivity."
         )
 
-    chunked = TokenChunkedDataset(
+    # Use document-aware chunking: each episode = one document.
+    # Documents shorter than seq_len/2 are skipped (not enough
+    # content for meaningful 75/25 adapt/eval split).
+    chunked = DocumentChunkedDataset(
         hf_dataset=hf_ds,
         tokenizer=tokenizer,
         seq_len=config.seq_len,
