@@ -335,10 +335,13 @@ def train_phase1(
         if batch_labels is not None:
             batch_labels = batch_labels.to(device)
 
+        # Only compute baseline at logging intervals (saves a forward pass)
+        should_log = (episode_idx + 1) % log_every == 0
+
         metrics = train_one_episode(
             model, input_ids, optimizer, config,
             labels=batch_labels,
-            compute_baseline=True,
+            compute_baseline=should_log,
         )
         scheduler.step()
 
