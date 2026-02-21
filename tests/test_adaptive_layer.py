@@ -328,7 +328,7 @@ class TestStability:
 
 class TestGateInit:
     def test_initial_gate_not_zero(self, layer, dummy_input):
-        """Gate should be slightly open initially (bias = -5.0 → ~0.007)."""
+        """Gate should be slightly open initially (bias = -3.0 → ~0.047)."""
         out_read = layer.read(dummy_input)
         # If gate were zero, output would equal h_t exactly (identity).
         # Check that memory has some effect (small but non-zero).
