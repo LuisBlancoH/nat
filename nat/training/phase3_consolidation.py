@@ -91,7 +91,10 @@ logger = logging.getLogger(__name__)
 # Constants                                                            #
 # ------------------------------------------------------------------ #
 
-DOMAINS: list[str] = ["math", "code", "reasoning", "text", "science"]
+DOMAINS: list[str] = [
+    "math", "code", "reasoning", "text", "science",
+    "knowledge", "commonsense", "trivia",
+]
 """Default domain names for Phase 3 training."""
 
 
@@ -366,6 +369,34 @@ def build_domain_dataloader(
                 f"Question: {ex['question']}\n"
                 f"Answer: {ex['correct_answer']}\n"
                 f"Explanation: {ex['support']}\n\n"
+            ),
+        },
+        "knowledge": {
+            "name": "cais/mmlu",
+            "config": "all",
+            "split": "test",
+            "formatter": lambda ex: (
+                f"Subject: {ex.get('subject', 'general')}\n"
+                f"Question: {ex['question']}\n"
+                f"Answer: {ex['choices'][ex['answer']] if isinstance(ex['answer'], int) and 0 <= ex['answer'] < len(ex['choices']) else ex['choices'][0]}\n\n"
+            ),
+        },
+        "commonsense": {
+            "name": "Rowan/hellaswag",
+            "config": None,
+            "split": "train",
+            "formatter": lambda ex: (
+                f"{ex['ctx']} "
+                f"{ex['endings'][int(ex['label'])] if str(ex['label']).isdigit() else ex['endings'][0]}\n\n"
+            ),
+        },
+        "trivia": {
+            "name": "trivia_qa",
+            "config": "rc.nocontext",
+            "split": "train",
+            "formatter": lambda ex: (
+                f"Question: {ex['question']}\n"
+                f"Answer: {ex['answer']['value'] if ex['answer'].get('value') else ex['answer'].get('aliases', [''])[0]}\n\n"
             ),
         },
     }

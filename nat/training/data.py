@@ -315,16 +315,24 @@ class RealEpisodicDataset(Dataset):
     per episode into a single tokenised sequence, and records
     ``problem_spans`` for per-problem loss computation.
 
-    Sources (loaded via streaming, mixed):
-      - ``openai/gsm8k``  — grade-school math
-      - ``allenai/ai2_arc`` (ARC-Easy) — science reasoning
-      - ``TIGER-Lab/MMLU-Pro`` — multi-domain knowledge
+    Sources (~380 K QA pairs total, each loaded gracefully):
+      - ``openai/gsm8k``        — grade-school math (~7.5 K)
+      - ``allenai/ai2_arc``     — science reasoning, Easy + Challenge (~3.4 K)
+      - ``cais/mmlu``           — multi-domain knowledge (~14 K)
+      - ``tau/commonsense_qa``  — commonsense reasoning (~10 K)
+      - ``ybisk/piqa``          — physical intuition (~16 K)
+      - ``google/boolq``        — yes / no reading comprehension (~9.4 K)
+      - ``Rowan/hellaswag``     — commonsense completion (~40 K)
+      - ``allenai/sciq``        — science with explanations (~12 K)
+      - ``allenai/openbookqa``  — open-book science QA (~5 K)
+      - ``trivia_qa``           — trivia / factual recall (~138 K)
+      - ``allenai/winogrande``  — coreference / commonsense (~40 K)
 
     Falls back gracefully if a dataset is unavailable.
     """
 
-    # Dataset configs: (name, config, split, question_key, answer_key, formatter)
     SOURCES = [
+        # ── Math ──
         {
             "name": "openai/gsm8k",
             "config": "main",
@@ -336,6 +344,7 @@ class RealEpisodicDataset(Dataset):
                 else ex["answer"],
             ),
         },
+        # ── Science (easy) ──
         {
             "name": "allenai/ai2_arc",
             "config": "ARC-Easy",
@@ -347,6 +356,129 @@ class RealEpisodicDataset(Dataset):
                 ]
                 if ex["answerKey"] in ex["choices"]["label"]
                 else ex["choices"]["text"][0],
+            ),
+        },
+        # ── Science (hard) ──
+        {
+            "name": "allenai/ai2_arc",
+            "config": "ARC-Challenge",
+            "split": "train",
+            "formatter": lambda ex: (
+                ex["question"],
+                ex["choices"]["text"][
+                    ex["choices"]["label"].index(ex["answerKey"])
+                ]
+                if ex["answerKey"] in ex["choices"]["label"]
+                else ex["choices"]["text"][0],
+            ),
+        },
+        # ── Multi-domain knowledge ──
+        {
+            "name": "cais/mmlu",
+            "config": "all",
+            "split": "test",
+            "formatter": lambda ex: (
+                ex["question"],
+                ex["choices"][ex["answer"]]
+                if isinstance(ex["answer"], int)
+                and 0 <= ex["answer"] < len(ex["choices"])
+                else ex["choices"][0],
+            ),
+        },
+        # ── Commonsense reasoning ──
+        {
+            "name": "tau/commonsense_qa",
+            "config": None,
+            "split": "train",
+            "formatter": lambda ex: (
+                ex["question"],
+                ex["choices"]["text"][
+                    ex["choices"]["label"].index(ex["answerKey"])
+                ]
+                if ex["answerKey"] in ex["choices"]["label"]
+                else ex["choices"]["text"][0],
+            ),
+        },
+        # ── Physical intuition ──
+        {
+            "name": "ybisk/piqa",
+            "config": None,
+            "split": "train",
+            "formatter": lambda ex: (
+                ex["goal"],
+                ex["sol1"] if ex["label"] == 0 else ex["sol2"],
+            ),
+        },
+        # ── Reading comprehension (yes/no) ──
+        {
+            "name": "google/boolq",
+            "config": None,
+            "split": "train",
+            "formatter": lambda ex: (
+                ex["question"],
+                "Yes" if ex["answer"] else "No",
+            ),
+        },
+        # ── Commonsense completion ──
+        {
+            "name": "Rowan/hellaswag",
+            "config": None,
+            "split": "train",
+            "formatter": lambda ex: (
+                ex["ctx"],
+                ex["endings"][int(ex["label"])]
+                if str(ex["label"]).isdigit()
+                else ex["endings"][0],
+            ),
+        },
+        # ── Science with explanations ──
+        {
+            "name": "allenai/sciq",
+            "config": None,
+            "split": "train",
+            "formatter": lambda ex: (
+                ex["question"],
+                ex["correct_answer"],
+            ),
+        },
+        # ── Open-book science QA ──
+        {
+            "name": "allenai/openbookqa",
+            "config": "main",
+            "split": "train",
+            "formatter": lambda ex: (
+                ex["question_stem"],
+                ex["choices"]["text"][
+                    ex["choices"]["label"].index(ex["answerKey"])
+                ]
+                if ex["answerKey"] in ex["choices"]["label"]
+                else ex["choices"]["text"][0],
+            ),
+        },
+        # ── Trivia / factual recall ──
+        {
+            "name": "trivia_qa",
+            "config": "rc.nocontext",
+            "split": "train",
+            "formatter": lambda ex: (
+                ex["question"],
+                ex["answer"]["value"]
+                if ex["answer"].get("value")
+                else (
+                    ex["answer"]["aliases"][0]
+                    if ex["answer"].get("aliases")
+                    else ""
+                ),
+            ),
+        },
+        # ── Coreference / commonsense ──
+        {
+            "name": "allenai/winogrande",
+            "config": "winogrande_xl",
+            "split": "train",
+            "formatter": lambda ex: (
+                ex["sentence"],
+                ex["option1"] if ex["answer"] == "1" else ex["option2"],
             ),
         },
     ]
