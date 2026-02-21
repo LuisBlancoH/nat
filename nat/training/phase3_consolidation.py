@@ -358,11 +358,17 @@ def build_domain_dataloader(
         ],
         "code": [
             {
-                "name": "bigcode/starcoderdata",
-                "config": "python",
+                "name": "codeparrot/github-code-clean",
+                "config": "Python-all",
                 "split": "train",
-                "formatter": lambda ex: ex.get("content", ""),
+                "formatter": lambda ex: ex.get("code", ""),
                 "streaming": True,
+            },
+            {
+                "name": "nampdn-ai/tiny-codes",
+                "config": None,
+                "split": "train",
+                "formatter": lambda ex: ex.get("response", ex.get("prompt", "")),
             },
         ],
         "reasoning": [
