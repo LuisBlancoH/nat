@@ -52,6 +52,7 @@ Usage
 from __future__ import annotations
 
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -217,6 +218,14 @@ def train_one_episodic_step(
     )
 
     # ---- Backward + optimiser ----
+    if torch.isnan(total_loss) or torch.isinf(total_loss):
+        return {
+            "loss": float("nan"),
+            "per_problem_losses": per_problem_losses,
+            "improvement": float("nan"),
+            "num_problems": len(per_problem_losses),
+        }
+
     optimizer.zero_grad()
     total_loss.backward()
 
@@ -328,6 +337,8 @@ def train_phase2(
     episode_idx = 0
     running_loss = 0.0
     running_improvement = 0.0
+    valid_in_window = 0
+    nan_total = 0
     t0 = time.time()
     final_loss = float("inf")
 
@@ -353,15 +364,26 @@ def train_phase2(
         )
         scheduler.step()
 
+        if math.isnan(metrics["loss"]):
+            nan_total += 1
+            logger.warning(
+                f"[Episode {episode_idx + 1}] NaN loss — skipping "
+                f"(total NaN: {nan_total})"
+            )
+            episode_idx += 1
+            continue
+
         running_loss += metrics["loss"]
         running_improvement += metrics["improvement"]
         final_loss = metrics["loss"]
+        valid_in_window += 1
         episode_idx += 1
 
         # ---- Periodic logging ----
         if episode_idx % log_every == 0:
-            avg_loss = running_loss / log_every
-            avg_impr = running_improvement / log_every
+            n = max(valid_in_window, 1)
+            avg_loss = running_loss / n
+            avg_impr = running_improvement / n
             elapsed = time.time() - t0
             eps_per_sec = episode_idx / elapsed if elapsed > 0 else 0
 
@@ -392,8 +414,12 @@ def train_phase2(
                 log_dict.update(model.diagnostics())
                 wandb.log(log_dict)
 
+            if nan_total > 0:
+                logger.info(f"  NaN episodes so far: {nan_total}")
+
             running_loss = 0.0
             running_improvement = 0.0
+            valid_in_window = 0
 
         # ---- Periodic checkpoint ----
         if episode_idx % save_every == 0:

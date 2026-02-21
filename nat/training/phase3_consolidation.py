@@ -916,8 +916,20 @@ def train_one_run(
 
         # ---- Periodic backprop + truncation ----
         if num_accumulated >= truncate_every or session_idx == len(sequence) - 1:
-            optimizer.zero_grad()
             avg_loss = accumulated_loss / num_accumulated
+
+            if torch.isnan(avg_loss) or torch.isinf(avg_loss):
+                logger.warning(
+                    f"  NaN/Inf loss in run {run_idx}, session {session_idx} — skipping update"
+                )
+                accumulated_loss = torch.tensor(
+                    0.0, device=device, requires_grad=True
+                )
+                num_accumulated = 0
+                _truncate_consolidated_weights(model)
+                continue
+
+            optimizer.zero_grad()
             avg_loss.backward()
 
             if grad_clip > 0:
@@ -1126,6 +1138,7 @@ def train_phase3(
     running_loss = 0.0
     running_improvement = 0.0
     running_forgetting = 0.0
+    valid_in_window = 0
     final_metrics: dict[str, Any] = {}
 
     for run_idx in range(num_runs):
@@ -1141,16 +1154,22 @@ def train_phase3(
             available_domains=available_domains,
         )
 
+        if math.isnan(metrics["mean_loss"]):
+            logger.warning(f"[Run {run_idx + 1}] NaN mean_loss — skipping")
+            continue
+
         running_loss += metrics["mean_loss"]
         running_improvement += metrics["cross_session_improvement"]
         running_forgetting += metrics["forgetting"]
+        valid_in_window += 1
         final_metrics = metrics
 
         # ---- Periodic logging ----
         if (run_idx + 1) % log_every == 0:
-            avg_loss = running_loss / log_every
-            avg_impr = running_improvement / log_every
-            avg_forg = running_forgetting / log_every
+            n = max(valid_in_window, 1)
+            avg_loss = running_loss / n
+            avg_impr = running_improvement / n
+            avg_forg = running_forgetting / n
             elapsed = time.time() - t0
 
             logger.info(
@@ -1190,6 +1209,7 @@ def train_phase3(
             running_loss = 0.0
             running_improvement = 0.0
             running_forgetting = 0.0
+            valid_in_window = 0
 
         # ---- Periodic checkpoint ----
         if (run_idx + 1) % save_every == 0:
