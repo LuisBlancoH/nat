@@ -77,7 +77,7 @@ def main():
     # Silence noisy HTTP loggers from HF dataset streaming
     for _noisy in ("httpx", "urllib3", "filelock", "fsspec"):
         logging.getLogger(_noisy).setLevel(logging.WARNING)
-    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
     # ---- Load config ----
     config = NATConfig.from_yaml(args.config)
