@@ -273,6 +273,11 @@ def train_phase1(
         try:
             import wandb
             if not wandb.run:
+                if wandb.api.api_key is None:
+                    raise RuntimeError(
+                        "wandb API key not found. Run `wandb login` or "
+                        "set WANDB_API_KEY before using --wandb."
+                    )
                 wandb.init(
                     project=config.wandb_project,
                     entity=getattr(config, "wandb_entity", None),

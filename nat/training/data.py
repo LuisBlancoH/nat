@@ -193,7 +193,6 @@ def build_phase1_dataloader(
         dataset_config,
         split="train",
         streaming=True,
-        trust_remote_code=True,
     )
 
     chunked = TokenChunkedDataset(
