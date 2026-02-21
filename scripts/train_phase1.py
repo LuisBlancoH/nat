@@ -74,6 +74,9 @@ def main():
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Silence noisy HTTP loggers from HF dataset streaming
+    for _noisy in ("httpx", "urllib3", "filelock", "fsspec", "huggingface_hub"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
 
     # ---- Load config ----
     config = NATConfig.from_yaml(args.config)
