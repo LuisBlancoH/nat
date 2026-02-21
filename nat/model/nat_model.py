@@ -107,7 +107,7 @@ class NATModel(nn.Module):
             from transformers import AutoModelForCausalLM
             self.base_model = AutoModelForCausalLM.from_pretrained(
                 config.base_model_name,
-                torch_dtype=getattr(config, "torch_dtype", torch.bfloat16),
+                dtype=getattr(config, "torch_dtype", torch.bfloat16),
             )
 
         if tokenizer is not None:
