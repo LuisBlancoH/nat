@@ -182,6 +182,105 @@ class SyntheticDomainDataset(Dataset):
         return {"input_ids": self.data[idx]}
 
 
+# ------------------------------------------------------------------ #
+# Real domain text dataset                                             #
+# ------------------------------------------------------------------ #
+
+class DomainTextDataset(Dataset):
+    """
+    Tokenised text dataset from a single domain.
+
+    Takes a HuggingFace dataset (map or streaming), applies a formatter
+    to extract text, tokenises, and chunks into fixed-length sequences.
+
+    Parameters
+    ----------
+    hf_dataset
+        A HuggingFace ``Dataset`` or ``IterableDataset``.
+    tokenizer
+        HuggingFace tokenizer.
+    formatter : callable
+        Function that takes an example dict and returns a text string.
+    seq_len : int
+        Tokens per sequence.
+    num_episodes : int
+        Number of sequences to pre-build.
+    streaming : bool
+        Whether ``hf_dataset`` is a streaming dataset.
+    """
+
+    def __init__(
+        self,
+        hf_dataset,
+        tokenizer,
+        formatter,
+        seq_len: int = 2048,
+        num_episodes: int = 256,
+        streaming: bool = False,
+    ):
+        super().__init__()
+        self.seq_len = seq_len
+        self.data: list[torch.Tensor] = []
+
+        # Tokenise and chunk
+        buffer: list[int] = []
+        pad_id = tokenizer.eos_token_id or 0
+
+        iterator = iter(hf_dataset) if streaming else iter(hf_dataset)
+
+        for example in iterator:
+            try:
+                text = formatter(example)
+                if not text or not text.strip():
+                    continue
+                tokens = tokenizer.encode(text, add_special_tokens=False)
+                buffer.extend(tokens)
+            except (KeyError, IndexError, TypeError):
+                continue
+
+            # Drain buffer into seq_len chunks
+            while len(buffer) >= seq_len:
+                self.data.append(
+                    torch.tensor(buffer[:seq_len], dtype=torch.long)
+                )
+                buffer = buffer[seq_len:]
+
+                if len(self.data) >= num_episodes:
+                    break
+
+            if len(self.data) >= num_episodes:
+                break
+
+        # If we didn't get enough, pad the last partial buffer
+        if len(self.data) < num_episodes and len(buffer) > 0:
+            buffer.extend([pad_id] * (seq_len - len(buffer)))
+            self.data.append(
+                torch.tensor(buffer[:seq_len], dtype=torch.long)
+            )
+
+        # If still not enough, duplicate existing data
+        if len(self.data) == 0:
+            logger.warning(
+                "DomainTextDataset: no data loaded, using random fallback"
+            )
+            self.data = [
+                torch.randint(0, 1000, (seq_len,))
+                for _ in range(num_episodes)
+            ]
+        elif len(self.data) < num_episodes:
+            original_len = len(self.data)
+            while len(self.data) < num_episodes:
+                self.data.append(self.data[len(self.data) % original_len])
+
+        logger.info(f"  → Domain dataset: {len(self.data)} sequences ready")
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        return {"input_ids": self.data[idx]}
+
+
 def build_domain_dataloader(
     config,
     domain: str,
@@ -221,21 +320,102 @@ def build_domain_dataloader(
         )
 
     # ---- Real data ----
-    # Map domain names to HuggingFace datasets:
-    #   "math"      → gsm8k
-    #   "code"      → openai_humaneval
-    #   "reasoning" → allenai/ai2_arc
-    #   "text"      → c4 (en)
-    #   "science"   → sciq
-    # Left as extension point — the synthetic path covers the training
-    # loop mechanics; real data wiring is task-dependent.
     assert tokenizer is not None, (
         "tokenizer is required for non-synthetic data. "
         "Pass synthetic=True for testing."
     )
-    raise NotImplementedError(
-        f"Real domain data loading for '{domain}' not implemented. "
-        "Use synthetic=True for testing."
+
+    from datasets import load_dataset
+
+    # Map domain names to HuggingFace datasets
+    DOMAIN_SOURCES: dict[str, dict] = {
+        "math": {
+            "name": "openai/gsm8k",
+            "config": "main",
+            "split": "train",
+            "formatter": lambda ex: f"Problem: {ex['question']}\nSolution: {ex['answer']}\n\n",
+        },
+        "code": {
+            "name": "bigcode/starcoderdata",
+            "config": "python",
+            "split": "train",
+            "formatter": lambda ex: ex.get("content", ""),
+        },
+        "reasoning": {
+            "name": "allenai/ai2_arc",
+            "config": "ARC-Challenge",
+            "split": "train",
+            "formatter": lambda ex: (
+                f"Question: {ex['question']}\n"
+                f"Choices: {', '.join(ex['choices']['text'])}\n"
+                f"Answer: {ex['choices']['text'][ex['choices']['label'].index(ex['answerKey'])] if ex['answerKey'] in ex['choices']['label'] else ex['choices']['text'][0]}\n\n"
+            ),
+        },
+        "text": {
+            "name": "allenai/c4",
+            "config": "en",
+            "split": "train",
+            "formatter": lambda ex: ex.get("text", ""),
+            "streaming": True,
+        },
+        "science": {
+            "name": "allenai/sciq",
+            "config": None,
+            "split": "train",
+            "formatter": lambda ex: (
+                f"Question: {ex['question']}\n"
+                f"Answer: {ex['correct_answer']}\n"
+                f"Explanation: {ex['support']}\n\n"
+            ),
+        },
+    }
+
+    if domain not in DOMAIN_SOURCES:
+        raise ValueError(
+            f"Unknown domain '{domain}'. "
+            f"Available: {list(DOMAIN_SOURCES.keys())}"
+        )
+
+    src = DOMAIN_SOURCES[domain]
+    is_streaming = src.get("streaming", False)
+
+    logger.info(f"Loading domain '{domain}' from {src['name']}...")
+
+    load_kwargs = {
+        "split": src["split"],
+    }
+    if src["config"] is not None:
+        load_kwargs["name"] = src["config"]
+    if is_streaming:
+        load_kwargs["streaming"] = True
+
+    try:
+        hf_ds = load_dataset(src["name"], **load_kwargs)
+    except Exception as e:
+        logger.warning(
+            f"Failed to load {src['name']} for domain '{domain}': {e}. "
+            f"Falling back to synthetic data."
+        )
+        return build_domain_dataloader(config, domain, synthetic=True)
+
+    # Build a tokenised-chunk dataset from the domain data
+    domain_dataset = DomainTextDataset(
+        hf_dataset=hf_ds,
+        tokenizer=tokenizer,
+        formatter=src["formatter"],
+        seq_len=config.seq_len,
+        num_episodes=max(
+            getattr(config, "sessions_per_domain_p3", 20) * 4, 64
+        ),
+        streaming=is_streaming,
+    )
+
+    return DataLoader(
+        domain_dataset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        drop_last=True,
+        num_workers=0,
     )
 
 
@@ -705,8 +885,11 @@ def train_phase3(
     # ================================================================
     domain_dataloaders: dict[str, DataLoader] = {}
     domain_iters: dict[str, Any] = {}
+    tokenizer = getattr(model, "tokenizer", None)
     for domain in DOMAINS:
-        dl = build_domain_dataloader(config, domain, synthetic=True)
+        dl = build_domain_dataloader(
+            config, domain, tokenizer=tokenizer, synthetic=synthetic,
+        )
         domain_dataloaders[domain] = dl
         domain_iters[domain] = iter(dl)
 

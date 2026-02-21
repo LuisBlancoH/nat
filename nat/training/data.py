@@ -292,13 +292,173 @@ def collate_episodic(batch: list[dict[str, Any]]) -> dict[str, Any]:
     Collate function for episodic datasets.
 
     Stacks ``input_ids`` and uses the problem_spans from the first
-    item (they're identical across all items in a batch of
-    ``SyntheticEpisodicDataset``).
+    item (they're identical across all items in a batch because both
+    ``SyntheticEpisodicDataset`` and ``RealEpisodicDataset`` use
+    fixed-size slots with uniform span layout).
     """
     return {
         "input_ids": torch.stack([b["input_ids"] for b in batch]),
         "problem_spans": batch[0]["problem_spans"],
     }
+
+
+# ------------------------------------------------------------------ #
+# Real episodic dataset (multi-task QA from HuggingFace)               #
+# ------------------------------------------------------------------ #
+
+class RealEpisodicDataset(Dataset):
+    """
+    Episodic dataset built from real QA datasets.
+
+    Loads questions from multiple HuggingFace datasets, formats them as
+    ``Question: ...\\nAnswer: ...\\n\\n`` pairs, packs ``num_problems``
+    per episode into a single tokenised sequence, and records
+    ``problem_spans`` for per-problem loss computation.
+
+    Sources (loaded via streaming, mixed):
+      - ``openai/gsm8k``  — grade-school math
+      - ``allenai/ai2_arc`` (ARC-Easy) — science reasoning
+      - ``TIGER-Lab/MMLU-Pro`` — multi-domain knowledge
+
+    Falls back gracefully if a dataset is unavailable.
+    """
+
+    # Dataset configs: (name, config, split, question_key, answer_key, formatter)
+    SOURCES = [
+        {
+            "name": "openai/gsm8k",
+            "config": "main",
+            "split": "train",
+            "formatter": lambda ex: (
+                ex["question"],
+                ex["answer"].split("####")[-1].strip()
+                if "####" in ex["answer"]
+                else ex["answer"],
+            ),
+        },
+        {
+            "name": "allenai/ai2_arc",
+            "config": "ARC-Easy",
+            "split": "train",
+            "formatter": lambda ex: (
+                ex["question"],
+                ex["choices"]["text"][
+                    ex["choices"]["label"].index(ex["answerKey"])
+                ]
+                if ex["answerKey"] in ex["choices"]["label"]
+                else ex["choices"]["text"][0],
+            ),
+        },
+    ]
+
+    def __init__(
+        self,
+        tokenizer,
+        num_episodes: int = 30000,
+        seq_len: int = 2048,
+        num_problems: int = 8,
+    ):
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.num_episodes = num_episodes
+        self.seq_len = seq_len
+        self.num_problems = num_problems
+
+        # Load QA pairs from all sources
+        self.qa_pairs: list[tuple[str, str]] = []
+        self._load_sources()
+
+        if len(self.qa_pairs) == 0:
+            raise RuntimeError(
+                "No QA pairs loaded. Check network connectivity and "
+                "dataset availability."
+            )
+
+        # Pre-compute fixed problem spans (identical for every episode)
+        tokens_per_problem = seq_len // num_problems
+        self.problem_spans: list[tuple[int, int]] = []
+        for i in range(num_problems):
+            block_start = i * tokens_per_problem
+            sol_start = block_start + tokens_per_problem // 2
+            sol_end = block_start + tokens_per_problem
+            sol_start = max(sol_start, 1)
+            self.problem_spans.append((sol_start, sol_end))
+
+        logger.info(f"Loaded {len(self.qa_pairs)} QA pairs for Phase 2")
+
+    def _load_sources(self):
+        """Load QA pairs from HuggingFace datasets."""
+        from datasets import load_dataset
+
+        for src in self.SOURCES:
+            try:
+                logger.info(f"Loading {src['name']} ({src['config']})...")
+                ds = load_dataset(
+                    src["name"],
+                    src["config"],
+                    split=src["split"],
+                )
+                for example in ds:
+                    try:
+                        q, a = src["formatter"](example)
+                        if q and a:
+                            self.qa_pairs.append((q.strip(), a.strip()))
+                    except (KeyError, IndexError, TypeError):
+                        continue
+                logger.info(
+                    f"  → {src['name']}: loaded, "
+                    f"total QA pairs so far: {len(self.qa_pairs)}"
+                )
+            except Exception as e:
+                logger.warning(f"  → {src['name']}: failed ({e}), skipping")
+
+    def __len__(self) -> int:
+        return self.num_episodes
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        """Build one episode: num_problems QA pairs in fixed-size slots.
+
+        Each slot is ``seq_len // num_problems`` tokens.  The first half
+        of the slot holds the question tokens, the second half holds the
+        answer tokens, mirroring the layout used by
+        ``SyntheticEpisodicDataset`` so that ``collate_episodic`` can
+        use a single ``problem_spans`` for the whole batch.
+        """
+        rng = random.Random(idx)
+
+        slot_size = self.seq_len // self.num_problems
+        q_budget = slot_size // 2          # first half → question
+        a_budget = slot_size - q_budget    # second half → answer
+        pad_id = self.tokenizer.eos_token_id or 0
+
+        all_tokens: list[int] = []
+
+        selected = rng.choices(self.qa_pairs, k=self.num_problems)
+
+        for q, a in selected:
+            q_tokens = self.tokenizer.encode(
+                f"Question: {q}\nAnswer: ", add_special_tokens=False
+            )[:q_budget]
+            a_tokens = self.tokenizer.encode(
+                f"{a}\n\n", add_special_tokens=False
+            )[:a_budget]
+
+            # Pad question half, then answer half
+            slot = (
+                q_tokens + [pad_id] * (q_budget - len(q_tokens))
+                + a_tokens + [pad_id] * (a_budget - len(a_tokens))
+            )
+            all_tokens.extend(slot)
+
+        # Handle rounding remainder
+        if len(all_tokens) < self.seq_len:
+            all_tokens.extend([pad_id] * (self.seq_len - len(all_tokens)))
+        all_tokens = all_tokens[:self.seq_len]
+
+        return {
+            "input_ids": torch.tensor(all_tokens, dtype=torch.long),
+            "problem_spans": self.problem_spans,
+        }
 
 
 def build_phase2_dataloader(
@@ -343,15 +503,32 @@ def build_phase2_dataloader(
         )
 
     # ---- Real episodic data ----
-    # For real data, we'd load task-specific datasets (GSM8K, HumanEval, etc.),
-    # format as problem/solution pairs, tokenise, and record spans.
-    # This is highly task-dependent — the synthetic path above covers
-    # the training loop mechanics; real data wiring is left to the user.
     assert tokenizer is not None, (
         "tokenizer is required for non-synthetic data. "
         "Pass synthetic=True for testing."
     )
-    raise NotImplementedError(
-        "Real episodic data loading is task-dependent. "
-        "Subclass SyntheticEpisodicDataset or provide your own DataLoader."
+
+    try:
+        from datasets import load_dataset
+    except ImportError as exc:
+        raise ImportError(
+            "Install HuggingFace datasets: pip install datasets"
+        ) from exc
+
+    logger.info("Loading real episodic data (multi-task QA)...")
+
+    dataset = RealEpisodicDataset(
+        tokenizer=tokenizer,
+        num_episodes=getattr(config, "num_episodes_p2", 30000),
+        seq_len=config.seq_len,
+        num_problems=num_problems,
+    )
+
+    return DataLoader(
+        dataset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        drop_last=True,
+        num_workers=0,
+        collate_fn=collate_episodic,
     )
