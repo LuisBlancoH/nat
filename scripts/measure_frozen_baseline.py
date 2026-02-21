@@ -56,10 +56,14 @@ def _measure_lm_loss(model, dataloader, device, n_samples: int) -> float:
 
 
 def _measure_episodic_loss(model, dataloader, device, n_samples: int) -> float:
-    """Measure loss restricted to solution spans (Phase 2 format)."""
+    """Measure loss restricted to solution spans (Phase 2 format).
+
+    Uses ``labels`` from the batch (padding positions are ``-100``
+    and excluded from the loss via ``ignore_index``).
+    """
     total_loss = 0.0
     data_iter = iter(dataloader)
-    loss_fn = torch.nn.CrossEntropyLoss()
+    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100)
 
     for i in range(n_samples):
         try:
@@ -69,6 +73,11 @@ def _measure_episodic_loss(model, dataloader, device, n_samples: int) -> float:
             batch = next(data_iter)
 
         input_ids = batch["input_ids"].to(device)
+        labels = batch.get("labels")
+        if labels is not None:
+            labels = labels.to(device)
+        else:
+            labels = input_ids
         spans = batch["problem_spans"]
 
         with torch.no_grad():
@@ -80,7 +89,7 @@ def _measure_episodic_loss(model, dataloader, device, n_samples: int) -> float:
             if end <= start or start < 1:
                 continue
             pred = logits[:, start - 1 : end - 1, :].contiguous()
-            tgt = input_ids[:, start:end].contiguous()
+            tgt = labels[:, start:end].contiguous()
             span_losses.append(
                 loss_fn(pred.view(-1, pred.size(-1)), tgt.view(-1))
             )

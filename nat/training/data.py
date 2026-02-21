@@ -312,6 +312,7 @@ class SyntheticEpisodicDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, Any]:
         return {
             "input_ids": self.data[idx],
+            "labels": self.data[idx].clone(),
             "problem_spans": self.problem_spans,
         }
 
@@ -320,13 +321,15 @@ def collate_episodic(batch: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Collate function for episodic datasets.
 
-    Stacks ``input_ids`` and uses the problem_spans from the first
-    item (they're identical across all items in a batch because both
-    ``SyntheticEpisodicDataset`` and ``RealEpisodicDataset`` use
-    fixed-size slots with uniform span layout).
+    Stacks ``input_ids`` and ``labels``, and uses the problem_spans from
+    the first item (they're identical across all items in a batch
+    because both ``SyntheticEpisodicDataset`` and
+    ``RealEpisodicDataset`` use fixed-size slots with uniform span
+    layout).
     """
     return {
         "input_ids": torch.stack([b["input_ids"] for b in batch]),
+        "labels": torch.stack([b["labels"] for b in batch]),
         "problem_spans": batch[0]["problem_spans"],
     }
 
@@ -605,6 +608,7 @@ class RealEpisodicDataset(Dataset):
         pad_id = self.tokenizer.eos_token_id or 0
 
         all_tokens: list[int] = []
+        all_labels: list[int] = []
 
         # Source-balanced sampling: pick a random source, then a
         # random example from it — every source gets equal weight
@@ -622,20 +626,32 @@ class RealEpisodicDataset(Dataset):
                 f"{a}\n\n", add_special_tokens=False
             )[:a_budget]
 
-            # Pad question half, then answer half
+            q_pad_len = q_budget - len(q_tokens)
+            a_pad_len = a_budget - len(a_tokens)
+
+            # input_ids: question + padding + answer + padding
             slot = (
-                q_tokens + [pad_id] * (q_budget - len(q_tokens))
-                + a_tokens + [pad_id] * (a_budget - len(a_tokens))
+                q_tokens + [pad_id] * q_pad_len
+                + a_tokens + [pad_id] * a_pad_len
+            )
+            # labels: -100 for question & padding, real ids for answer only
+            slot_labels = (
+                [-100] * q_budget
+                + a_tokens + [-100] * a_pad_len
             )
             all_tokens.extend(slot)
+            all_labels.extend(slot_labels)
 
         # Handle rounding remainder
         if len(all_tokens) < self.seq_len:
             all_tokens.extend([pad_id] * (self.seq_len - len(all_tokens)))
+            all_labels.extend([-100] * (self.seq_len - len(all_labels)))
         all_tokens = all_tokens[:self.seq_len]
+        all_labels = all_labels[:self.seq_len]
 
         return {
             "input_ids": torch.tensor(all_tokens, dtype=torch.long),
+            "labels": torch.tensor(all_labels, dtype=torch.long),
             "problem_spans": self.problem_spans,
         }
 

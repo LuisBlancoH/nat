@@ -831,6 +831,13 @@ def train_one_run(
     # Track per-domain losses
     domain_losses: dict[str, list[float]] = defaultdict(list)
 
+    # Running EMA of per-domain loss for normalization.
+    # Domains with naturally higher loss (e.g. code ~9.6) get their
+    # gradients scaled down so they don't dominate over low-loss
+    # domains (e.g. math ~0.5).
+    domain_loss_ema: dict[str, float] = {}
+    EMA_DECAY = 0.9
+
     # Loss accumulator for batched backprop
     accumulated_loss = torch.tensor(0.0, device=device, requires_grad=True)
     num_accumulated = 0
@@ -884,7 +891,24 @@ def train_one_run(
         )
 
         domain_losses[domain].append(session_loss.item())
-        accumulated_loss = accumulated_loss + session_loss
+
+        # ---- Domain-normalized loss ----
+        # Divide by running EMA so all domains contribute ~1.0 to
+        # the gradient, preventing high-loss domains (code) from
+        # dominating low-loss ones (math).
+        raw_loss_val = session_loss.item()
+        if domain in domain_loss_ema:
+            domain_loss_ema[domain] = (
+                EMA_DECAY * domain_loss_ema[domain]
+                + (1 - EMA_DECAY) * raw_loss_val
+            )
+        else:
+            domain_loss_ema[domain] = raw_loss_val
+
+        normalizer = max(domain_loss_ema[domain], 1e-6)
+        normalized_loss = session_loss / normalizer
+
+        accumulated_loss = accumulated_loss + normalized_loss
         num_accumulated += 1
 
         # ---- End session: differentiable consolidation ----

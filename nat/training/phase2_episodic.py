@@ -80,6 +80,7 @@ def compute_episodic_loss(
     input_ids: torch.Tensor,
     problem_spans: list[tuple[int, int]],
     improvement_weight: float = 0.1,
+    labels: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, list[float], torch.Tensor]:
     """
     Compute the episodic loss with improvement bonus.
@@ -88,12 +89,15 @@ def compute_episodic_loss(
     ----------
     logits : Tensor, shape ``(batch, seq_len, vocab_size)``
     input_ids : LongTensor, shape ``(batch, seq_len)``
-        Used as labels (next-token prediction).
+        Used as labels (next-token prediction) when ``labels`` is None.
     problem_spans : list[(sol_start, sol_end)]
         Token index ranges for each solution.  Loss is computed only
         over solution tokens.
     improvement_weight : float
         Coefficient for the improvement bonus term.
+    labels : LongTensor, shape ``(batch, seq_len)``, optional
+        If provided, used instead of ``input_ids`` as targets.
+        Positions set to ``-100`` are excluded from the loss.
 
     Returns
     -------
@@ -101,12 +105,13 @@ def compute_episodic_loss(
     per_problem_losses : list[float]  (detached, for logging)
     improvement : scalar Tensor
     """
+    targets = labels if labels is not None else input_ids
     problem_losses: list[torch.Tensor] = []
 
     for sol_start, sol_end in problem_spans:
         # Shift: logits at position t predict token at position t+1
         sol_logits = logits[:, sol_start - 1 : sol_end - 1, :]
-        sol_labels = input_ids[:, sol_start:sol_end]
+        sol_labels = targets[:, sol_start:sol_end]
 
         if sol_logits.numel() == 0 or sol_labels.numel() == 0:
             continue
@@ -149,6 +154,7 @@ def train_one_episodic_step(
     problem_spans: list[tuple[int, int]],
     optimizer: torch.optim.Optimizer,
     config,
+    labels: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     """
     One Phase-2 training step (one episode).
@@ -165,6 +171,8 @@ def train_one_episodic_step(
     problem_spans : list[(sol_start, sol_end)]
     optimizer : Optimizer on ``model.get_trainable_parameters()``
     config : NATConfig
+    labels : LongTensor ``(batch, seq_len)``, optional
+        If provided, positions set to ``-100`` are excluded from loss.
 
     Returns
     -------
@@ -204,7 +212,8 @@ def train_one_episodic_step(
     # ---- Compute episodic loss ----
     improvement_weight = getattr(config, "improvement_weight", 0.1)
     total_loss, per_problem_losses, improvement = compute_episodic_loss(
-        all_logits, input_ids, problem_spans, improvement_weight
+        all_logits, input_ids, problem_spans, improvement_weight,
+        labels=labels,
     )
 
     # ---- Backward + optimiser ----
@@ -334,9 +343,13 @@ def train_phase2(
 
         input_ids = batch["input_ids"].to(device)
         problem_spans = batch["problem_spans"]
+        labels = batch.get("labels")
+        if labels is not None:
+            labels = labels.to(device)
 
         metrics = train_one_episodic_step(
             model, input_ids, problem_spans, optimizer, config,
+            labels=labels,
         )
         scheduler.step()
 
