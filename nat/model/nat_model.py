@@ -439,7 +439,8 @@ class NATModel(nn.Module):
     ) -> dict[str, Any]:
         """
         Verify that the manual forward pass matches the base model's output
-        when adaptive layers are disabled (zero fast weights, gate ≈ 0.27).
+        when adaptive layers have reset fast weights (gate ≈ 0.007, LayerNorm
+        on memory branch only → near-identity).
 
         Returns dict with ``"max_diff"``, ``"mean_diff"``, ``"passes"``.
         """

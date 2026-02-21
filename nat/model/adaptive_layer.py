@@ -299,16 +299,18 @@ class AdaptiveMemoryLayer(nn.Module):
             torch.bmm(self.fast_B, h_T),
         ).transpose(1, 2)                                 # (batch, seq_len, d_model)
 
-        # Process through read network
-        memory_output = self.read_net(memory_raw)          # (batch, seq_len, d_model)
+        # Process through read network + normalise the memory branch
+        memory_output = self.layer_norm(
+            self.read_net(memory_raw)
+        )                                                  # (batch, seq_len, d_model)
 
         # Gate: how much to trust memory vs. pass-through
         gate_input = torch.cat([h_t, memory_output], dim=-1)
         gate = self.gate_net(gate_input)                   # (batch, seq_len, 1)
 
-        # Residual connection with gated memory readout
-        output = h_t + gate * memory_output
-        return self.layer_norm(output)
+        # Residual connection with gated memory readout.
+        # When gate ≈ 0 the output is exactly h_t (identity).
+        return h_t + gate * memory_output
 
     # ------------------------------------------------------------------ #
     # Forward pass                                                         #

@@ -410,14 +410,13 @@ class TestDiagnostics:
 class TestParity:
     @torch.no_grad()
     def test_parity_check_method_runs(self, nat_model, dummy_ids):
-        """The parity check at least runs without error.
-        Due to the gate being ~0.27 (not zero), the output will differ
-        slightly from the base model, but it should be reasonably close."""
+        """With gate ≈ 0.007 and LayerNorm on the memory branch only,
+        NAT with reset fast weights should be near-identical to frozen
+        base model output."""
         result = nat_model.check_parity(dummy_ids)
         assert "max_diff" in result
         assert "mean_diff" in result
         assert "passes" in result
-        # With random init, diff may be large — just check it's finite
         assert result["max_diff"] < float("inf")
 
 
