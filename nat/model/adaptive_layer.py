@@ -111,16 +111,18 @@ class AdaptiveMemoryLayer(nn.Module):
 
         # --- Gate network ---
         # Decides how much to trust the memory readout vs. the pass-through.
-        # Bias initialised to -1.0 so initial gate ≈ 0.27 (slightly open,
-        # avoids the "gate-always-0" failure mode).
+        # Bias initialised to -5.0 so initial gate ≈ 0.007 — near-identity
+        # at init (tiny perturbation to frozen model) while keeping
+        # gradients alive.  The gate can open as θ learns when memory is
+        # useful.
         self.gate_net = nn.Sequential(
             nn.Linear(d_model * 2, d_hidden),
             nn.GELU(),
             nn.Linear(d_hidden, 1),
             nn.Sigmoid(),
         )
-        # Initialise final gate bias to -1.0
-        nn.init.constant_(self.gate_net[-2].bias, -1.0)
+        # Initialise final gate bias to -5.0
+        nn.init.constant_(self.gate_net[-2].bias, -5.0)
 
         # --- State predictor ---
         # Predicts the next hidden state for surprise computation.

@@ -71,14 +71,14 @@ class ConsolidationLayer(nn.Module):
 
         # --- Gate network ---
         # Decides how much to trust consolidated memory vs. pass-through.
-        # Bias initialised to -1.0 → initial gate ≈ 0.27 (slightly open).
+        # Bias initialised to -5.0 → initial gate ≈ 0.007 (near-identity).
         self.gate_net = nn.Sequential(
             nn.Linear(d_model * 2, d_hidden),
             nn.GELU(),
             nn.Linear(d_hidden, 1),
             nn.Sigmoid(),
         )
-        nn.init.constant_(self.gate_net[-2].bias, -1.0)
+        nn.init.constant_(self.gate_net[-2].bias, -5.0)
 
         # Layer norm for output stability
         self.layer_norm = nn.LayerNorm(d_model)

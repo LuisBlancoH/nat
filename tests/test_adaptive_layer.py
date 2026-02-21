@@ -202,7 +202,10 @@ class TestSelfModification:
         layer.reset_fast_weights(BATCH)
         out_with_adapt = layer(dummy_input, do_adapt=True).detach().clone()
 
-        assert not torch.allclose(out_no_adapt, out_with_adapt, atol=1e-6), (
+        # With near-identity gate init (~0.007), the difference is tiny
+        # but must be non-zero.
+        max_diff = (out_no_adapt - out_with_adapt).abs().max().item()
+        assert max_diff > 0, (
             "Output identical with and without adaptation"
         )
 
@@ -325,12 +328,12 @@ class TestStability:
 
 class TestGateInit:
     def test_initial_gate_not_zero(self, layer, dummy_input):
-        """Gate should be slightly open initially (bias = -1.0 → ~0.27)."""
+        """Gate should be slightly open initially (bias = -5.0 → ~0.007)."""
         out_read = layer.read(dummy_input)
         # If gate were zero, output would equal input after layer norm
-        # Check that memory has some effect
+        # Check that memory has some effect (small but non-zero)
         diff = (out_read - layer.layer_norm(dummy_input)).abs().mean()
-        assert diff > 1e-6, "Gate appears to be stuck at 0"
+        assert diff > 1e-8, "Gate appears to be stuck at 0"
 
 
 # ============================================================
