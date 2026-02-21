@@ -49,6 +49,7 @@ Usage
 from __future__ import annotations
 
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -197,6 +198,13 @@ def train_one_episode(
     # ================================================================
     # BACKWARD + OPTIMISER STEP
     # ================================================================
+    if torch.isnan(loss) or torch.isinf(loss):
+        # All-padding eval window or numerical blowup — skip update
+        return {
+            "loss": float("nan"),
+            "num_adapt_steps": num_adapt_chunks,
+        }
+
     optimizer.zero_grad()
     loss.backward()
 
@@ -315,8 +323,10 @@ def train_phase1(
     # ---- Training loop ----
     episode_idx = 0
     running_loss = 0.0
-    last_baseline = 0.0
-    last_benefit = 0.0
+    running_baseline = 0.0
+    running_benefit = 0.0
+    valid_in_window = 0          # episodes with non-NaN loss
+    nan_total = 0                # lifetime NaN counter
     t0 = time.time()
     final_loss = float("inf")
 
@@ -335,26 +345,37 @@ def train_phase1(
         if batch_labels is not None:
             batch_labels = batch_labels.to(device)
 
-        # Only compute baseline at logging intervals (saves a forward pass)
-        should_log = (episode_idx + 1) % log_every == 0
-
         metrics = train_one_episode(
             model, input_ids, optimizer, config,
             labels=batch_labels,
-            compute_baseline=should_log,
+            compute_baseline=True,
         )
         scheduler.step()
+
+        # Guard against NaN (e.g. all-padding eval window)
+        if math.isnan(metrics["loss"]):
+            nan_total += 1
+            logger.warning(
+                f"[Episode {episode_idx + 1}] NaN loss — skipping "
+                f"(likely all-padding eval window, total NaN: {nan_total})"
+            )
+            episode_idx += 1
+            continue
 
         running_loss += metrics["loss"]
         final_loss = metrics["loss"]
         if "baseline_loss" in metrics:
-            last_baseline = metrics["baseline_loss"]
-            last_benefit = metrics["adaptation_benefit"]
+            running_baseline += metrics["baseline_loss"]
+            running_benefit += metrics["adaptation_benefit"]
+        valid_in_window += 1
         episode_idx += 1
 
         # ---- Periodic logging ----
         if episode_idx % log_every == 0:
-            avg_loss = running_loss / log_every
+            n = max(valid_in_window, 1)  # avoid div-by-zero
+            avg_loss = running_loss / n
+            avg_baseline = running_baseline / n
+            avg_benefit = running_benefit / n
             elapsed = time.time() - t0
             eps_per_sec = episode_idx / elapsed if elapsed > 0 else 0
 
@@ -363,8 +384,8 @@ def train_phase1(
                 f"loss={avg_loss:.4f}  "
                 f"lr={scheduler.get_last_lr()[0]:.2e}  "
                 f"eps/s={eps_per_sec:.1f}  "
-                f"baseline={last_baseline:.4f}  "
-                f"benefit={last_benefit:.4f}"
+                f"baseline={avg_baseline:.4f}  "
+                f"benefit={avg_benefit:.4f}"
             )
             logger.info(log_msg)
 
@@ -376,15 +397,21 @@ def train_phase1(
                 log_dict = {
                     "episode": episode_idx,
                     "loss": avg_loss,
-                    "baseline_loss": last_baseline,
-                    "adaptation_benefit": last_benefit,
+                    "baseline_loss": avg_baseline,
+                    "adaptation_benefit": avg_benefit,
                     "lr": scheduler.get_last_lr()[0],
                     "eps_per_sec": eps_per_sec,
                 }
                 log_dict.update(diag)
                 wandb.log(log_dict)
 
+            if nan_total > 0:
+                logger.info(f"  NaN episodes so far: {nan_total}")
+
             running_loss = 0.0
+            running_baseline = 0.0
+            running_benefit = 0.0
+            valid_in_window = 0
 
         # ---- Periodic checkpoint ----
         if episode_idx % save_every == 0:

@@ -316,12 +316,27 @@ def build_phase1_dataloader(
         )
 
     # Use document-aware chunking: each episode = one document.
-    # Documents shorter than seq_len/2 are skipped (not enough
-    # content for meaningful 75/25 adapt/eval split).
+    # The 75/25 adapt/eval split means eval starts at position
+    # int(seq_len * 0.75).  Documents must be long enough that the
+    # eval window contains real tokens, otherwise cross-entropy on
+    # all-padding (-100) labels produces NaN.
+    adapt_len = int(config.seq_len * 0.75)
+    chunk_size = getattr(config, "adapt_every_n", 32)
+    adapt_len = (adapt_len // chunk_size) * chunk_size
+    # Require at least 128 real eval tokens (or 25% of eval window)
+    eval_window = config.seq_len - adapt_len
+    min_eval_tokens = max(128, eval_window // 4)
+    min_doc_len = adapt_len + min_eval_tokens
+    logger.info(
+        f"DocumentChunkedDataset: seq_len={config.seq_len}, "
+        f"adapt_len={adapt_len}, min_doc_len={min_doc_len}"
+    )
+
     chunked = DocumentChunkedDataset(
         hf_dataset=hf_ds,
         tokenizer=tokenizer,
         seq_len=config.seq_len,
+        min_len=min_doc_len,
         text_column=text_column,
     )
 
