@@ -379,18 +379,21 @@ def train_phase1(
             elapsed = time.time() - t0
             eps_per_sec = episode_idx / elapsed if elapsed > 0 else 0
 
+            # Diagnostics (compute before log so we can include gate info)
+            diag = model.diagnostics()
+            gate_A = diag.get("adaptive_A/gate_bias", -5.0)
+            gate_B = diag.get("adaptive_B/gate_bias", -5.0)
+
             log_msg = (
                 f"[Episode {episode_idx}/{num_episodes}]  "
                 f"loss={avg_loss:.4f}  "
                 f"lr={scheduler.get_last_lr()[0]:.2e}  "
                 f"eps/s={eps_per_sec:.1f}  "
                 f"baseline={avg_baseline:.4f}  "
-                f"benefit={avg_benefit:.4f}"
+                f"benefit={avg_benefit:.4f}  "
+                f"gate_A={gate_A:.2f}  gate_B={gate_B:.2f}"
             )
             logger.info(log_msg)
-
-            # Diagnostics
-            diag = model.diagnostics()
 
             if use_wandb:
                 import wandb

@@ -402,6 +402,7 @@ class TestDiagnostics:
             "W_c_A_mean", "W_c_B_mean",
             "W_c_A_max", "W_c_B_max",
             "beta",
+            "gate_bias", "gate_sigmoid",
         }
         assert set(stats.keys()) == expected_keys
 

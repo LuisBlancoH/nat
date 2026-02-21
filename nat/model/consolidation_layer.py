@@ -199,7 +199,8 @@ class ConsolidationLayer(nn.Module):
     # ------------------------------------------------------------------ #
 
     def consolidated_weight_stats(self) -> dict[str, float]:
-        """Return diagnostic statistics about consolidated weights."""
+        """Return diagnostic statistics about consolidated weights and gate."""
+        gate_bias = self.gate_net[-2].bias.item()
         return {
             "W_c_A_norm": torch.norm(self.W_c_A).item(),
             "W_c_B_norm": torch.norm(self.W_c_B).item(),
@@ -208,6 +209,8 @@ class ConsolidationLayer(nn.Module):
             "W_c_A_max": self.W_c_A.abs().max().item(),
             "W_c_B_max": self.W_c_B.abs().max().item(),
             "beta": self.beta,
+            "gate_bias": gate_bias,
+            "gate_sigmoid": torch.sigmoid(torch.tensor(gate_bias)).item(),
         }
 
     @property

@@ -347,9 +347,11 @@ class AdaptiveMemoryLayer(nn.Module):
     # ------------------------------------------------------------------ #
 
     def fast_weight_stats(self) -> dict[str, float]:
-        """Return diagnostic statistics about fast weights."""
+        """Return diagnostic statistics about fast weights and gate."""
         if self.fast_A is None or self.fast_B is None:
             return {"fast_A_norm": 0.0, "fast_B_norm": 0.0}
+        # Gate bias (last Linear before Sigmoid in gate_net)
+        gate_bias = self.gate_net[-2].bias.item()
         return {
             "fast_A_norm": torch.norm(self.fast_A).item(),
             "fast_B_norm": torch.norm(self.fast_B).item(),
@@ -357,4 +359,6 @@ class AdaptiveMemoryLayer(nn.Module):
             "fast_B_mean": self.fast_B.mean().item(),
             "fast_A_max":  self.fast_A.abs().max().item(),
             "fast_B_max":  self.fast_B.abs().max().item(),
+            "gate_bias":   gate_bias,
+            "gate_sigmoid": torch.sigmoid(torch.tensor(gate_bias)).item(),
         }
