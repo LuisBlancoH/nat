@@ -120,14 +120,13 @@ class TestForwardPass:
         assert not torch.isinf(out).any(), "Inf in output"
 
     def test_output_with_zero_weights_is_close_to_input(self, layer, dummy_input):
-        """With W_c = 0, memory readout is zero; output ≈ LayerNorm(input)."""
+        """With W_c = 0, memory readout is zero; output ≈ h_t (identity)."""
         out = layer(dummy_input)
-        # The memory_raw will be all zeros, so memory_output = read_net(0),
-        # gate will be applied to it. The output should be close to
-        # layer_norm(input + gate * read_net(0)).
-        # Just verify it's finite and shaped correctly.
-        assert out.shape == dummy_input.shape
-        assert not torch.isnan(out).any()
+        # With zero consolidated weights, memory_raw is all zeros.
+        # gate ≈ 0.007, so output ≈ h_t + 0.007 * LN(read_net(0)).
+        # Should be very close to the input.
+        diff = (out - dummy_input).abs().max().item()
+        assert diff < 0.1, f"Output too far from identity: max_diff={diff}"
 
     def test_output_changes_after_consolidation(
         self, layer, dummy_input, adaptive_layers
@@ -300,8 +299,9 @@ class TestGateInit:
         layer.W_c_B = torch.randn_like(layer.W_c_B) * 0.1
 
         out = layer(dummy_input)
-        ln_input = layer.layer_norm(dummy_input)
-        diff = (out - ln_input).abs().mean()
+        # With gate ≈ 0, output ≈ h_t.  Check that the small gate
+        # and non-zero weights produce a measurable (but tiny) diff.
+        diff = (out - dummy_input).abs().mean()
         assert diff > 1e-8, "Gate appears stuck at 0"
 
     def test_gate_bias_value(self, layer):
