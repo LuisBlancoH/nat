@@ -98,8 +98,8 @@ class NATConfig:
         self.torch_dtype = dtype_map.get(self.base_dtype, torch.bfloat16)
 
         # Set aliases used by training scripts
-        self.lr = self.lr_phase1
-        self.num_episodes = self.num_episodes_p1
+        self.lr = float(self.lr_phase1)
+        self.num_episodes = int(self.num_episodes_p1)
 
         # Apply CUDA-specific global settings
         if self.device == "cuda":
@@ -117,7 +117,21 @@ class NATConfig:
         """Load config from a YAML file."""
         with open(path, "r") as f:
             data = yaml.safe_load(f)
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        # Coerce YAML values to declared dataclass types (some YAML
+        # parsers return strings for scientific notation like 3e-4).
+        filtered = {}
+        for k, v in data.items():
+            if k not in cls.__dataclass_fields__:
+                continue
+            ft = cls.__dataclass_fields__[k].type
+            if ft is float and isinstance(v, str):
+                v = float(v)
+            elif ft is int and isinstance(v, str):
+                v = int(v)
+            elif ft is bool and isinstance(v, str):
+                v = v.lower() in ("true", "1", "yes")
+            filtered[k] = v
+        return cls(**filtered)
 
     def to_dict(self) -> dict:
         """Convert config to a dictionary (for wandb logging)."""
