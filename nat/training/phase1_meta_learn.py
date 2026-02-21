@@ -294,7 +294,7 @@ def train_phase1(
                     config=config.to_dict(),
                 )
                 if wandb.run:
-                    logger.info(f"W&B run: {wandb.run.get_url()}")
+                    logger.info(f"W&B run: {wandb.run.url}")
                     wandb.define_metric("episode")
                     wandb.define_metric("*", step_metric="episode")
         except ImportError:

@@ -302,7 +302,6 @@ def build_phase1_dataloader(
                 src["config"],
                 split="train",
                 streaming=True,
-                trust_remote_code=True,
             )
             text_column = src["text_column"]
             logger.info(f"  → loaded successfully")
@@ -662,7 +661,6 @@ class RealEpisodicDataset(Dataset):
                     src["name"],
                     src["config"],
                     split=src["split"],
-                    trust_remote_code=True,
                 )
                 for example in ds:
                     try:

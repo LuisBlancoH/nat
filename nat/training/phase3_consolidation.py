@@ -507,7 +507,7 @@ def build_domain_dataloader(
         try:
             logger.info(f"Loading domain '{domain}' source: {src['name']}...")
             hf_ds = load_dataset(
-                src["name"], **load_kwargs, trust_remote_code=True,
+                src["name"], **load_kwargs,
             )
             loaded_datasets.append(hf_ds)
             formatters.append(src["formatter"])
@@ -1096,7 +1096,7 @@ def train_phase3(
                     tags=["phase3"],
                 )
                 if wandb.run:
-                    logger.info(f"W&B run: {wandb.run.get_url()}")
+                    logger.info(f"W&B run: {wandb.run.url}")
                     wandb.define_metric("run")
                     wandb.define_metric("*", step_metric="run")
         except ImportError:
