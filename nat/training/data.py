@@ -190,13 +190,22 @@ class DocumentChunkedDataset(IterableDataset):
                 max_start = len(tokens) - self.seq_len
                 start = random.randint(0, max_start) if max_start > 0 else 0
                 chunk = tokens[start : start + self.seq_len]
+                real_len = self.seq_len
             else:
                 # Pad to seq_len (right-pad with pad_token_id)
+                real_len = len(tokens)
                 chunk = tokens + [self.pad_token_id] * (
-                    self.seq_len - len(tokens)
+                    self.seq_len - real_len
                 )
 
-            yield {"input_ids": torch.tensor(chunk, dtype=torch.long)}
+            input_ids = torch.tensor(chunk, dtype=torch.long)
+
+            # Labels: -100 at padding positions so loss ignores them
+            labels = input_ids.clone()
+            if real_len < self.seq_len:
+                labels[real_len:] = -100
+
+            yield {"input_ids": input_ids, "labels": labels}
 
 
 # ------------------------------------------------------------------ #

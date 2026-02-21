@@ -140,8 +140,13 @@ def _measure_lm_loss(
             batch = next(data_iter)
 
         input_ids = batch["input_ids"].to(device)
+        labels = batch.get("labels")
+        if labels is not None:
+            labels = labels.to(device)
+        else:
+            labels = input_ids.clone()
         with torch.no_grad():
-            out = model(input_ids, labels=input_ids.clone())
+            out = model(input_ids, labels=labels)
             stats.losses.append(out.loss.item())
 
         if (i + 1) % 10 == 0:

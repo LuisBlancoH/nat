@@ -94,6 +94,7 @@ def train_one_episode(
     optimizer: torch.optim.Optimizer,
     config,
     *,
+    labels: torch.Tensor | None = None,
     compute_baseline: bool = False,
 ) -> dict[str, float]:
     """
@@ -105,6 +106,9 @@ def train_one_episode(
     input_ids : LongTensor, shape ``(batch, seq_len)``
     optimizer : Optimizer over ``model.get_trainable_parameters()``
     config : NATConfig
+    labels : LongTensor, optional
+        Same shape as ``input_ids`` with ``-100`` at padding positions.
+        If ``None``, falls back to ``input_ids.clone()`` (no masking).
     compute_baseline : bool
         If True, also compute loss *without* adaptation for comparison.
         Adds overhead — use only for periodic logging.
@@ -153,7 +157,13 @@ def train_one_episode(
     # EVALUATION PHASE — measure quality of adapted fast weights
     # ================================================================
     eval_ids = input_ids[:, eval_start:]
-    eval_labels = eval_ids.clone()
+
+    # Use labels from batch if available (padding positions are -100).
+    # Fall back to cloning input_ids for synthetic / legacy data.
+    if labels is not None:
+        eval_labels = labels[:, eval_start:]
+    else:
+        eval_labels = eval_ids.clone()
 
     output = model(eval_ids, labels=eval_labels)
     loss = output["loss"]
@@ -321,9 +331,13 @@ def train_phase1(
             batch = next(data_iter)
 
         input_ids = batch["input_ids"].to(device)
+        batch_labels = batch.get("labels")
+        if batch_labels is not None:
+            batch_labels = batch_labels.to(device)
 
         metrics = train_one_episode(
             model, input_ids, optimizer, config,
+            labels=batch_labels,
             compute_baseline=True,
         )
         scheduler.step()
