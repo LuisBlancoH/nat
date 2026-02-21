@@ -315,8 +315,8 @@ def train_phase1(
     # ---- Training loop ----
     episode_idx = 0
     running_loss = 0.0
-    running_baseline = 0.0
-    running_benefit = 0.0
+    last_baseline = 0.0
+    last_benefit = 0.0
     t0 = time.time()
     final_loss = float("inf")
 
@@ -348,15 +348,13 @@ def train_phase1(
         running_loss += metrics["loss"]
         final_loss = metrics["loss"]
         if "baseline_loss" in metrics:
-            running_baseline += metrics["baseline_loss"]
-            running_benefit += metrics["adaptation_benefit"]
+            last_baseline = metrics["baseline_loss"]
+            last_benefit = metrics["adaptation_benefit"]
         episode_idx += 1
 
         # ---- Periodic logging ----
         if episode_idx % log_every == 0:
             avg_loss = running_loss / log_every
-            avg_baseline = running_baseline / log_every
-            avg_benefit = running_benefit / log_every
             elapsed = time.time() - t0
             eps_per_sec = episode_idx / elapsed if elapsed > 0 else 0
 
@@ -365,8 +363,8 @@ def train_phase1(
                 f"loss={avg_loss:.4f}  "
                 f"lr={scheduler.get_last_lr()[0]:.2e}  "
                 f"eps/s={eps_per_sec:.1f}  "
-                f"baseline={avg_baseline:.4f}  "
-                f"benefit={avg_benefit:.4f}"
+                f"baseline={last_baseline:.4f}  "
+                f"benefit={last_benefit:.4f}"
             )
             logger.info(log_msg)
 
@@ -378,8 +376,8 @@ def train_phase1(
                 log_dict = {
                     "episode": episode_idx,
                     "loss": avg_loss,
-                    "baseline_loss": avg_baseline,
-                    "adaptation_benefit": avg_benefit,
+                    "baseline_loss": last_baseline,
+                    "adaptation_benefit": last_benefit,
                     "lr": scheduler.get_last_lr()[0],
                     "eps_per_sec": eps_per_sec,
                 }
@@ -387,8 +385,6 @@ def train_phase1(
                 wandb.log(log_dict)
 
             running_loss = 0.0
-            running_baseline = 0.0
-            running_benefit = 0.0
 
         # ---- Periodic checkpoint ----
         if episode_idx % save_every == 0:
