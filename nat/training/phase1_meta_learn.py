@@ -317,7 +317,8 @@ def train_phase1(
         input_ids = batch["input_ids"].to(device)
 
         # Compute baseline only at logging steps (saves compute)
-        do_baseline = (episode_idx % log_every == 0)
+        # +1 because episode_idx is incremented after train_one_episode
+        do_baseline = ((episode_idx + 1) % log_every == 0)
 
         metrics = train_one_episode(
             model, input_ids, optimizer, config,
