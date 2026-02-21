@@ -237,8 +237,9 @@ def main():
         datefmt="%H:%M:%S",
     )
     # Silence noisy HTTP loggers from HF dataset streaming
-    for _noisy in ("httpx", "urllib3", "filelock", "fsspec", "huggingface_hub"):
+    for _noisy in ("httpx", "urllib3", "filelock", "fsspec"):
         logging.getLogger(_noisy).setLevel(logging.WARNING)
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
     config = NATConfig.from_yaml(args.config)
     device = torch.device(config.device)
