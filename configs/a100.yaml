@@ -1,0 +1,74 @@
+# NAT A100 Configuration
+# Optimised for NVIDIA A100 (40 GB / 80 GB HBM2e)
+#
+# Key advantages:
+#   - 40/80 GB dedicated VRAM — larger batches & sequences
+#   - TF32 tensor cores for faster float32 matmul
+#   - bfloat16 natively supported
+#   - torch.compile with CUDA graphs for fused kernels
+#   - cuDNN auto-tuner for optimal conv/matmul algorithms
+#
+# Expected timeline (single A100 80 GB):
+#   Phase 1: ~12-18 hours
+#   Phase 2: ~10-14 hours
+#   Phase 3: ~1-2 days
+#   Total:   ~2-4 days
+
+# Model
+base_model_name: "Qwen/Qwen2.5-1.5B"
+rank: 32
+d_hidden: 256
+
+# Adaptation — full frequency, plenty of VRAM
+adapt_every_n: 32
+lr_clamp: 0.1
+fast_weight_max_norm: 10.0
+
+# Consolidation
+beta: 0.999
+session_reset_alpha: 0.5
+
+# Training - Phase 1
+lr_phase1: 3e-4
+num_episodes_p1: 50000
+batch_size: 4              # can go up to 8 on 80 GB
+seq_len: 2048              # full context length
+truncated_bptt: 16
+grad_clip: 1.0
+weight_decay: 0.01
+
+# Training - Phase 2
+lr_phase2: 3e-4
+num_episodes_p2: 30000
+improvement_weight: 0.1
+num_problems_per_episode: 8
+
+# Training - Phase 3
+lr_phase3: 1e-4
+num_runs_p3: 100
+sessions_per_domain_p3: 20
+forgetting_test_sessions_p3: 5
+p3_truncate_sessions: 4
+
+# Device
+device: "cuda"
+base_dtype: "bfloat16"
+
+# Performance
+gradient_checkpointing: false  # not needed — plenty of VRAM
+compile_model: true            # torch.compile for fused CUDA kernels
+num_workers: 4                 # parallel data loading
+pin_memory: true               # faster host→device transfer
+empty_cache_every: 0           # 0 = disabled (not needed on CUDA)
+tf32_matmul: true              # use TF32 tensor cores (A100 feature)
+cudnn_benchmark: true          # auto-tune cuDNN algorithms
+cuda_amp: true                 # use torch.amp autocast for frozen layers
+
+# Logging
+wandb_project: "nat"
+wandb_entity: null
+log_every: 50
+
+# Saving
+save_dir: "checkpoints"
+save_every: 1000

@@ -1,0 +1,51 @@
+# NAT Small Configuration
+# For debugging and development on Apple Silicon / CPU
+
+# Model
+base_model_name: "Qwen/Qwen2.5-1.5B"
+rank: 16
+d_hidden: 128
+
+# Adaptation
+adapt_every_n: 64
+lr_clamp: 0.05
+fast_weight_max_norm: 10.0
+
+# Consolidation
+beta: 0.999
+session_reset_alpha: 0.5
+
+# Training - Phase 1
+lr_phase1: 3e-4
+num_episodes_p1: 1000
+batch_size: 1
+seq_len: 512
+truncated_bptt: 8
+grad_clip: 1.0
+weight_decay: 0.01
+
+# Training - Phase 2
+lr_phase2: 3e-4
+num_episodes_p2: 500
+improvement_weight: 0.1
+num_problems_per_episode: 4
+
+# Training - Phase 3
+lr_phase3: 1e-4
+num_runs_p3: 20
+sessions_per_domain_p3: 5
+forgetting_test_sessions_p3: 2
+p3_truncate_sessions: 2
+
+# Device
+device: "auto"
+base_dtype: "bfloat16"
+
+# Logging
+wandb_project: "nat-debug"
+wandb_entity: null
+log_every: 10
+
+# Saving
+save_dir: "checkpoints"
+save_every: 200

@@ -1,0 +1,51 @@
+# NAT Base Configuration
+# Default hyperparameters for full training
+
+# Model
+base_model_name: "Qwen/Qwen2.5-1.5B"
+rank: 32
+d_hidden: 256
+
+# Adaptation
+adapt_every_n: 32
+lr_clamp: 0.1
+fast_weight_max_norm: 10.0
+
+# Consolidation
+beta: 0.999
+session_reset_alpha: 0.5
+
+# Training - Phase 1
+lr_phase1: 3e-4
+num_episodes_p1: 50000
+batch_size: 4
+seq_len: 2048
+truncated_bptt: 16
+grad_clip: 1.0
+weight_decay: 0.01
+
+# Training - Phase 2
+lr_phase2: 3e-4
+num_episodes_p2: 30000
+improvement_weight: 0.1
+num_problems_per_episode: 8
+
+# Training - Phase 3
+lr_phase3: 1e-4
+num_runs_p3: 100
+sessions_per_domain_p3: 20
+forgetting_test_sessions_p3: 5
+p3_truncate_sessions: 4
+
+# Device
+device: "auto"  # auto-detect: cuda > mps > cpu
+base_dtype: "bfloat16"
+
+# Logging
+wandb_project: "nat"
+wandb_entity: null
+log_every: 50
+
+# Saving
+save_dir: "checkpoints"
+save_every: 1000

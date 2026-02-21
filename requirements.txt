@@ -1,0 +1,7 @@
+torch>=2.1
+transformers>=4.36
+datasets
+accelerate
+wandb
+einops
+pyyaml
