@@ -329,76 +329,144 @@ def build_domain_dataloader(
     )
 
     from datasets import load_dataset
+    from itertools import chain
 
-    # Map domain names to HuggingFace datasets
-    DOMAIN_SOURCES: dict[str, dict] = {
-        "math": {
-            "name": "openai/gsm8k",
-            "config": "main",
-            "split": "train",
-            "formatter": lambda ex: f"Problem: {ex['question']}\nSolution: {ex['answer']}\n\n",
-        },
-        "code": {
-            "name": "bigcode/starcoderdata",
-            "config": "python",
-            "split": "train",
-            "formatter": lambda ex: ex.get("content", ""),
-        },
-        "reasoning": {
-            "name": "allenai/ai2_arc",
-            "config": "ARC-Challenge",
-            "split": "train",
-            "formatter": lambda ex: (
-                f"Question: {ex['question']}\n"
-                f"Choices: {', '.join(ex['choices']['text'])}\n"
-                f"Answer: {ex['choices']['text'][ex['choices']['label'].index(ex['answerKey'])] if ex['answerKey'] in ex['choices']['label'] else ex['choices']['text'][0]}\n\n"
-            ),
-        },
-        "text": {
-            "name": "allenai/c4",
-            "config": "en",
-            "split": "train",
-            "formatter": lambda ex: ex.get("text", ""),
-            "streaming": True,
-        },
-        "science": {
-            "name": "allenai/sciq",
-            "config": None,
-            "split": "train",
-            "formatter": lambda ex: (
-                f"Question: {ex['question']}\n"
-                f"Answer: {ex['correct_answer']}\n"
-                f"Explanation: {ex['support']}\n\n"
-            ),
-        },
-        "knowledge": {
-            "name": "cais/mmlu",
-            "config": "all",
-            "split": "test",
-            "formatter": lambda ex: (
-                f"Subject: {ex.get('subject', 'general')}\n"
-                f"Question: {ex['question']}\n"
-                f"Answer: {ex['choices'][ex['answer']] if isinstance(ex['answer'], int) and 0 <= ex['answer'] < len(ex['choices']) else ex['choices'][0]}\n\n"
-            ),
-        },
-        "commonsense": {
-            "name": "Rowan/hellaswag",
-            "config": None,
-            "split": "train",
-            "formatter": lambda ex: (
-                f"{ex['ctx']} "
-                f"{ex['endings'][int(ex['label'])] if str(ex['label']).isdigit() else ex['endings'][0]}\n\n"
-            ),
-        },
-        "trivia": {
-            "name": "trivia_qa",
-            "config": "rc.nocontext",
-            "split": "train",
-            "formatter": lambda ex: (
-                f"Question: {ex['question']}\n"
-                f"Answer: {ex['answer']['value'] if ex['answer'].get('value') else ex['answer'].get('aliases', [''])[0]}\n\n"
-            ),
-        },
+    # ------------------------------------------------------------------ #
+    # Each domain maps to a LIST of sources — thin domains get extra      #
+    # datasets to avoid repeating the same 1 K examples across 100 runs.  #
+    # ------------------------------------------------------------------ #
+    _arc_formatter = lambda ex: (
+        f"Question: {ex['question']}\n"
+        f"Choices: {', '.join(ex['choices']['text'])}\n"
+        f"Answer: {ex['choices']['text'][ex['choices']['label'].index(ex['answerKey'])] if ex['answerKey'] in ex['choices']['label'] else ex['choices']['text'][0]}\n\n"
+    )
+
+    DOMAIN_SOURCES: dict[str, list[dict]] = {
+        "math": [
+            {
+                "name": "openai/gsm8k",
+                "config": "main",
+                "split": "train",
+                "formatter": lambda ex: f"Problem: {ex['question']}\nSolution: {ex['answer']}\n\n",
+            },
+            {
+                "name": "microsoft/orca-math-word-problems-200k",
+                "config": None,
+                "split": "train",
+                "formatter": lambda ex: f"Problem: {ex['question']}\nSolution: {ex['answer']}\n\n",
+            },
+        ],
+        "code": [
+            {
+                "name": "bigcode/starcoderdata",
+                "config": "python",
+                "split": "train",
+                "formatter": lambda ex: ex.get("content", ""),
+                "streaming": True,
+            },
+        ],
+        "reasoning": [
+            {
+                "name": "allenai/ai2_arc",
+                "config": "ARC-Challenge",
+                "split": "train",
+                "formatter": _arc_formatter,
+            },
+            {
+                "name": "allenai/ai2_arc",
+                "config": "ARC-Easy",
+                "split": "train",
+                "formatter": _arc_formatter,
+            },
+            {
+                "name": "allenai/openbookqa",
+                "config": "main",
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"Question: {ex['question_stem']}\n"
+                    f"Answer: {ex['choices']['text'][ex['choices']['label'].index(ex['answerKey'])] if ex['answerKey'] in ex['choices']['label'] else ex['choices']['text'][0]}\n\n"
+                ),
+            },
+            {
+                "name": "tau/commonsense_qa",
+                "config": None,
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"Question: {ex['question']}\n"
+                    f"Answer: {ex['choices']['text'][ex['choices']['label'].index(ex['answerKey'])] if ex['answerKey'] in ex['choices']['label'] else ex['choices']['text'][0]}\n\n"
+                ),
+            },
+        ],
+        "text": [
+            {
+                "name": "allenai/c4",
+                "config": "en",
+                "split": "train",
+                "formatter": lambda ex: ex.get("text", ""),
+                "streaming": True,
+            },
+        ],
+        "science": [
+            {
+                "name": "allenai/sciq",
+                "config": None,
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"Question: {ex['question']}\n"
+                    f"Answer: {ex['correct_answer']}\n"
+                    f"Explanation: {ex['support']}\n\n"
+                ),
+            },
+            {
+                "name": "allenai/ai2_arc",
+                "config": "ARC-Challenge",
+                "split": "train",
+                "formatter": _arc_formatter,
+            },
+        ],
+        "knowledge": [
+            {
+                "name": "cais/mmlu",
+                "config": "all",
+                "split": "test",
+                "formatter": lambda ex: (
+                    f"Subject: {ex.get('subject', 'general')}\n"
+                    f"Question: {ex['question']}\n"
+                    f"Answer: {ex['choices'][ex['answer']] if isinstance(ex['answer'], int) and 0 <= ex['answer'] < len(ex['choices']) else ex['choices'][0]}\n\n"
+                ),
+            },
+        ],
+        "commonsense": [
+            {
+                "name": "Rowan/hellaswag",
+                "config": None,
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"{ex['ctx']} "
+                    f"{ex['endings'][int(ex['label'])] if str(ex['label']).isdigit() else ex['endings'][0]}\n\n"
+                ),
+            },
+            {
+                "name": "ybisk/piqa",
+                "config": None,
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"Goal: {ex['goal']}\n"
+                    f"Solution: {ex['sol1'] if ex['label'] == 0 else ex['sol2']}\n\n"
+                ),
+            },
+        ],
+        "trivia": [
+            {
+                "name": "trivia_qa",
+                "config": "rc.nocontext",
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"Question: {ex['question']}\n"
+                    f"Answer: {ex['answer']['value'] if ex['answer'].get('value') else ex['answer'].get('aliases', [''])[0]}\n\n"
+                ),
+            },
+        ],
     }
 
     if domain not in DOMAIN_SOURCES:
@@ -407,38 +475,71 @@ def build_domain_dataloader(
             f"Available: {list(DOMAIN_SOURCES.keys())}"
         )
 
-    src = DOMAIN_SOURCES[domain]
-    is_streaming = src.get("streaming", False)
+    sources = DOMAIN_SOURCES[domain]
+    num_episodes = max(
+        getattr(config, "sessions_per_domain_p3", 20) * 4, 64
+    )
 
-    logger.info(f"Loading domain '{domain}' from {src['name']}...")
+    # Load all sources for this domain, merge into one DomainTextDataset
+    loaded_datasets: list = []
+    formatters: list = []
+    any_streaming = False
 
-    load_kwargs = {
-        "split": src["split"],
-    }
-    if src["config"] is not None:
-        load_kwargs["name"] = src["config"]
-    if is_streaming:
-        load_kwargs["streaming"] = True
+    for src in sources:
+        is_streaming = src.get("streaming", False)
+        load_kwargs: dict[str, Any] = {"split": src["split"]}
+        if src["config"] is not None:
+            load_kwargs["name"] = src["config"]
+        if is_streaming:
+            load_kwargs["streaming"] = True
+            any_streaming = True
 
-    try:
-        hf_ds = load_dataset(src["name"], **load_kwargs)
-    except Exception as e:
+        try:
+            logger.info(f"Loading domain '{domain}' source: {src['name']}...")
+            hf_ds = load_dataset(src["name"], **load_kwargs)
+            loaded_datasets.append(hf_ds)
+            formatters.append(src["formatter"])
+        except Exception as e:
+            logger.warning(f"  → {src['name']}: failed ({e}), skipping")
+
+    if not loaded_datasets:
         logger.warning(
-            f"Failed to load {src['name']} for domain '{domain}': {e}. "
+            f"No sources loaded for domain '{domain}'. "
             f"Falling back to synthetic data."
         )
         return build_domain_dataloader(config, domain, synthetic=True)
 
-    # Build a tokenised-chunk dataset from the domain data
+    # Build a single DomainTextDataset from the merged sources
+    # Chain the iterators so DomainTextDataset sees one stream
+    def _merged_iterator():
+        """Round-robin interleave all loaded datasets."""
+        iterators = [iter(ds) for ds in loaded_datasets]
+        active = list(range(len(iterators)))
+        while active:
+            next_active = []
+            for i in active:
+                try:
+                    ex = next(iterators[i])
+                    # Tag with the right formatter index
+                    ex["__src_idx__"] = i
+                    yield ex
+                except StopIteration:
+                    continue
+                else:
+                    next_active.append(i)
+            active = next_active
+
+    def _merged_formatter(ex):
+        idx = ex.pop("__src_idx__", 0)
+        return formatters[idx](ex)
+
     domain_dataset = DomainTextDataset(
-        hf_dataset=hf_ds,
+        hf_dataset=_merged_iterator(),
         tokenizer=tokenizer,
-        formatter=src["formatter"],
+        formatter=_merged_formatter,
         seq_len=config.seq_len,
-        num_episodes=max(
-            getattr(config, "sessions_per_domain_p3", 20) * 4, 64
-        ),
-        streaming=is_streaming,
+        num_episodes=num_episodes,
+        streaming=True,  # we always iterate our merged generator
     )
 
     return DataLoader(
