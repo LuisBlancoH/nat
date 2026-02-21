@@ -365,10 +365,12 @@ def build_domain_dataloader(
                 "streaming": True,
             },
             {
-                "name": "nampdn-ai/tiny-codes",
+                "name": "sahil2801/CodeAlpaca-20k",
                 "config": None,
                 "split": "train",
-                "formatter": lambda ex: ex.get("response", ex.get("prompt", "")),
+                "formatter": lambda ex: (
+                    f"{ex.get('prompt', '')}\n{ex.get('completion', '')}"
+                ),
             },
         ],
         "reasoning": [
@@ -502,7 +504,9 @@ def build_domain_dataloader(
 
         try:
             logger.info(f"Loading domain '{domain}' source: {src['name']}...")
-            hf_ds = load_dataset(src["name"], **load_kwargs)
+            hf_ds = load_dataset(
+                src["name"], **load_kwargs, trust_remote_code=True,
+            )
             loaded_datasets.append(hf_ds)
             formatters.append(src["formatter"])
         except Exception as e:

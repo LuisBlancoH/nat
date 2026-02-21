@@ -178,22 +178,51 @@ def build_phase1_dataloader(
             "Install HuggingFace datasets: pip install datasets"
         ) from exc
 
-    # Load a diverse text corpus via streaming
-    # Default: C4 (en) — widely available, diverse, large.
-    dataset_name = getattr(config, "dataset_name", "allenai/c4")
-    dataset_config = getattr(config, "dataset_config", "en")
-    text_column = getattr(config, "text_column", "text")
+    # Load a diverse text corpus via streaming.
+    # Try sources in order; fall back if one fails (network, auth, etc.).
+    PHASE1_SOURCES = [
+        {
+            "name": getattr(config, "dataset_name", "allenai/c4"),
+            "config": getattr(config, "dataset_config", "en"),
+            "text_column": getattr(config, "text_column", "text"),
+        },
+        {   # Fallback 1: FineWeb-Edu (open, diverse, high-quality)
+            "name": "HuggingFaceFW/fineweb-edu",
+            "config": "sample-10BT",
+            "text_column": "text",
+        },
+        {   # Fallback 2: Wikipedia
+            "name": "wikimedia/wikipedia",
+            "config": "20231101.en",
+            "text_column": "text",
+        },
+    ]
 
-    logger.info(
-        f"Loading streaming dataset: {dataset_name} ({dataset_config})"
-    )
+    hf_ds = None
+    text_column = "text"
+    for src in PHASE1_SOURCES:
+        try:
+            logger.info(
+                f"Loading streaming dataset: {src['name']} ({src['config']})"
+            )
+            hf_ds = load_dataset(
+                src["name"],
+                src["config"],
+                split="train",
+                streaming=True,
+                trust_remote_code=True,
+            )
+            text_column = src["text_column"]
+            logger.info(f"  → loaded successfully")
+            break
+        except Exception as e:
+            logger.warning(f"  → {src['name']}: failed ({e}), trying next...")
 
-    hf_ds = load_dataset(
-        dataset_name,
-        dataset_config,
-        split="train",
-        streaming=True,
-    )
+    if hf_ds is None:
+        raise RuntimeError(
+            "Could not load any Phase 1 text corpus. "
+            "Check network connectivity."
+        )
 
     chunked = TokenChunkedDataset(
         hf_dataset=hf_ds,
@@ -535,6 +564,7 @@ class RealEpisodicDataset(Dataset):
                     src["name"],
                     src["config"],
                     split=src["split"],
+                    trust_remote_code=True,
                 )
                 for example in ds:
                     try:
