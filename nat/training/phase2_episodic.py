@@ -299,6 +299,8 @@ def train_phase2(
                 )
                 if wandb.run:
                     logger.info(f"W&B run: {wandb.run.get_url()}")
+                    wandb.define_metric("episode")
+                    wandb.define_metric("*", step_metric="episode")
         except ImportError:
             logger.warning("wandb not installed — skipping W&B logging")
             use_wandb = False
@@ -375,7 +377,7 @@ def train_phase2(
                 for i, l in enumerate(per_prob):
                     log_dict[f"problem_{i}_loss"] = l
                 log_dict.update(model.diagnostics())
-                wandb.log(log_dict, step=episode_idx)
+                wandb.log(log_dict)
 
             running_loss = 0.0
             running_improvement = 0.0

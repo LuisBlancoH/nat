@@ -731,6 +731,8 @@ def train_phase3(
                 )
                 if wandb.run:
                     logger.info(f"W&B run: {wandb.run.get_url()}")
+                    wandb.define_metric("run")
+                    wandb.define_metric("*", step_metric="run")
         except ImportError:
             logger.warning("wandb not installed — skipping W&B logging")
             use_wandb = False
@@ -813,7 +815,7 @@ def train_phase3(
                 log_dict.update(
                     model.consolidation.consolidated_weight_stats()
                 )
-                wandb.log(log_dict, step=run_idx + 1)
+                wandb.log(log_dict)
 
             if avg_impr > best_improvement:
                 best_improvement = avg_impr
