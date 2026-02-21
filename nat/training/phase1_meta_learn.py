@@ -305,6 +305,8 @@ def train_phase1(
     # ---- Training loop ----
     episode_idx = 0
     running_loss = 0.0
+    running_baseline = 0.0
+    running_benefit = 0.0
     t0 = time.time()
     final_loss = float("inf")
 
@@ -320,23 +322,24 @@ def train_phase1(
 
         input_ids = batch["input_ids"].to(device)
 
-        # Compute baseline only at logging steps (saves compute)
-        # +1 because episode_idx is incremented after train_one_episode
-        do_baseline = ((episode_idx + 1) % log_every == 0)
-
         metrics = train_one_episode(
             model, input_ids, optimizer, config,
-            compute_baseline=do_baseline,
+            compute_baseline=True,
         )
         scheduler.step()
 
         running_loss += metrics["loss"]
         final_loss = metrics["loss"]
+        if "baseline_loss" in metrics:
+            running_baseline += metrics["baseline_loss"]
+            running_benefit += metrics["adaptation_benefit"]
         episode_idx += 1
 
         # ---- Periodic logging ----
         if episode_idx % log_every == 0:
             avg_loss = running_loss / log_every
+            avg_baseline = running_baseline / log_every
+            avg_benefit = running_benefit / log_every
             elapsed = time.time() - t0
             eps_per_sec = episode_idx / elapsed if elapsed > 0 else 0
 
@@ -344,13 +347,10 @@ def train_phase1(
                 f"[Episode {episode_idx}/{num_episodes}]  "
                 f"loss={avg_loss:.4f}  "
                 f"lr={scheduler.get_last_lr()[0]:.2e}  "
-                f"eps/s={eps_per_sec:.1f}"
+                f"eps/s={eps_per_sec:.1f}  "
+                f"baseline={avg_baseline:.4f}  "
+                f"benefit={avg_benefit:.4f}"
             )
-            if do_baseline and "adaptation_benefit" in metrics:
-                log_msg += (
-                    f"  baseline={metrics['baseline_loss']:.4f}"
-                    f"  benefit={metrics['adaptation_benefit']:.4f}"
-                )
             logger.info(log_msg)
 
             # Diagnostics
@@ -361,16 +361,17 @@ def train_phase1(
                 log_dict = {
                     "episode": episode_idx,
                     "loss": avg_loss,
+                    "baseline_loss": avg_baseline,
+                    "adaptation_benefit": avg_benefit,
                     "lr": scheduler.get_last_lr()[0],
                     "eps_per_sec": eps_per_sec,
                 }
-                if "adaptation_benefit" in metrics:
-                    log_dict["baseline_loss"] = metrics["baseline_loss"]
-                    log_dict["adaptation_benefit"] = metrics["adaptation_benefit"]
                 log_dict.update(diag)
                 wandb.log(log_dict)
 
             running_loss = 0.0
+            running_baseline = 0.0
+            running_benefit = 0.0
 
         # ---- Periodic checkpoint ----
         if episode_idx % save_every == 0:
