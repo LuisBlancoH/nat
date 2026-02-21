@@ -86,7 +86,7 @@ def _setup_cuda(config) -> None:
         gpu = torch.cuda.get_device_properties(0)
         logger.info(
             f"CUDA device: {gpu.name}, "
-            f"{gpu.total_mem / 1024**3:.1f} GB VRAM, "
+            f"{gpu.total_memory / 1024**3:.1f} GB VRAM, "
             f"compute capability {gpu.major}.{gpu.minor}"
         )
 
