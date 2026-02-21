@@ -297,6 +297,8 @@ def train_phase2(
                     entity=getattr(config, "wandb_entity", None),
                     config=config.to_dict(),
                 )
+                if wandb.run:
+                    logger.info(f"W&B run: {wandb.run.get_url()}")
         except ImportError:
             logger.warning("wandb not installed — skipping W&B logging")
             use_wandb = False

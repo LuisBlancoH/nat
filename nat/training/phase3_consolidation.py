@@ -729,6 +729,8 @@ def train_phase3(
                     config=config.to_dict(),
                     tags=["phase3"],
                 )
+                if wandb.run:
+                    logger.info(f"W&B run: {wandb.run.get_url()}")
         except ImportError:
             logger.warning("wandb not installed — skipping W&B logging")
             use_wandb = False
