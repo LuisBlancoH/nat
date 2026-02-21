@@ -158,7 +158,54 @@ def _measure_lm_loss(
     return stats
 
 
-def _measure_episodic_loss(
+def _measure_eval_only_loss(
+    model, dataloader, device, n_samples: int,
+    eval_start: int,
+    name: str = "eval-only",
+) -> LossStats:
+    """Measure loss on ONLY the last portion of each sequence.
+
+    This mirrors what Phase 1 training sees: loss is computed on
+    ``input_ids[:, eval_start:]`` with NO prior KV-cache context.
+    It's the fair comparison baseline for Phase 1 adapted loss.
+    """
+    import torch.nn.functional as F
+
+    stats = LossStats(name=name)
+    t0 = time.time()
+    data_iter = iter(dataloader)
+
+    for i in range(n_samples):
+        try:
+            batch = next(data_iter)
+        except StopIteration:
+            data_iter = iter(dataloader)
+            batch = next(data_iter)
+
+        input_ids = batch["input_ids"].to(device)
+        labels = batch.get("labels")
+        if labels is not None:
+            labels = labels.to(device)
+        else:
+            labels = input_ids.clone()
+
+        # Only feed the eval portion — no prior context
+        eval_ids = input_ids[:, eval_start:]
+        eval_labels = labels[:, eval_start:]
+
+        with torch.no_grad():
+            out = model(eval_ids, labels=eval_labels)
+            loss_val = out.loss.item()
+            if not math.isnan(loss_val):
+                stats.losses.append(loss_val)
+
+        if (i + 1) % 10 == 0:
+            logger.info(
+                f"  [{i + 1}/{n_samples}] running avg = {stats.mean:.4f}"
+            )
+
+    stats.elapsed_s = time.time() - t0
+    return stats
     model, dataloader, device, n_samples: int, name: str = "episodic",
 ) -> LossStats:
     """Measure loss restricted to solution spans (Phase 2 format).
@@ -262,13 +309,39 @@ def main():
 
     # ---- Phase 1: C4 language modelling ----
     if args.phase == 1:
-        logger.info("=== Phase 1 baseline: C4 language modelling ===")
+        logger.info("=== Phase 1 baseline: language modelling ===")
         from nat.training.data import build_phase1_dataloader
         dl = build_phase1_dataloader(config, tokenizer=tokenizer)
-        stats = _measure_lm_loss(
-            base_model, dl, device, args.samples, name="C4 (Phase 1)",
+
+        # Full-sequence loss (entire document, full self-attention)
+        stats_full = _measure_lm_loss(
+            base_model, dl, device, args.samples, name="full-seq",
         )
-        _print_stats_table([stats], "FROZEN BASELINE — Phase 1 (C4)")
+
+        # Eval-only loss: last 25 % with NO prior context.
+        # This is the fair comparison for Phase 1 training loss,
+        # which evaluates on the last 25 % after adapting on the
+        # first 75 % (but without KV cache, only fast weights).
+        adapt_len = int(config.seq_len * 0.75)
+        chunk_size = getattr(config, "adapt_every_n", 32)
+        adapt_len = (adapt_len // chunk_size) * chunk_size
+        eval_start = adapt_len
+
+        stats_eval = _measure_eval_only_loss(
+            base_model, dl, device, args.samples,
+            eval_start=eval_start,
+            name="eval-only (last 25%)",
+        )
+
+        _print_stats_table(
+            [stats_full, stats_eval],
+            "FROZEN BASELINE — Phase 1 (Language Modelling)",
+        )
+        print(
+            "\n  Compare 'full-seq' to general LM quality.\n"
+            "  Compare 'eval-only' to Phase 1 training loss/baseline.\n"
+            "  Phase 1 training benefit = eval-only − adapted_loss.\n"
+        )
 
     # ---- Phase 2: episodic QA ----
     elif args.phase == 2:
