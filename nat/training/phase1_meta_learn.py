@@ -176,38 +176,35 @@ def train_one_episode(
     adaptation_benefit = None
 
     if compute_baseline:
-        # Snapshot current adapted state
+        # Snapshot adapted state.  The KV cache was mutated in-place by
+        # the adapted eval, so it now has adapt_len + eval_len tokens.
+        # We crop back to adapt_len for a fair baseline, then restore.
         saved_A_a = model.adaptive_A.fast_A
         saved_B_a = model.adaptive_A.fast_B
         saved_A_b = model.adaptive_B.fast_A
         saved_B_b = model.adaptive_B.fast_B
         saved_step = model._step_counter
-        saved_cache = model._kv_cache
 
         with torch.no_grad():
-            # Reset everything — fresh fast weights + fresh KV cache
-            model.start_session(batch_size)
-
-            # Forward the adaptation chunks WITHOUT adaptation to build
-            # a clean KV cache.  suppress_adapt=True prevents fast-weight
-            # updates, so read() acts as near-identity with init weights.
-            # Frozen layers 10+ see un-adapted hidden states → clean K/V.
-            for chunk_start in range(0, adapt_len, chunk_size):
-                chunk_end = min(chunk_start + chunk_size, adapt_len)
-                chunk_ids = input_ids[:, chunk_start:chunk_end]
-                _ = model(chunk_ids, suppress_adapt=True)
-
-            # Now eval with init fast weights + full KV cache context
-            baseline_output = model(eval_ids, labels=eval_labels)
+            # Reset fast weights to init.  Reuse the adapted run's KV
+            # cache (detached) — the only variable is fast weights.
+            model.adaptive_A.reset_fast_weights(batch_size)
+            model.adaptive_B.reset_fast_weights(batch_size)
+            model._step_counter = adapt_len
+            # Crop cache to adaptation-only tokens
+            if model._kv_cache is not None:
+                model._kv_cache.crop(adapt_len)
+            baseline_output = model(eval_ids, labels=eval_labels,
+                                    suppress_adapt=True)
             baseline_loss_val = baseline_output["loss"].item()
 
-        # Restore adapted weights, position counter, KV cache
+        # Restore adapted state (cache now has adapt+eval tokens again,
+        # which is fine — next episode calls start_session()).
         model.adaptive_A.fast_A = saved_A_a
         model.adaptive_A.fast_B = saved_B_a
         model.adaptive_B.fast_A = saved_A_b
         model.adaptive_B.fast_B = saved_B_b
         model._step_counter = saved_step
-        model._kv_cache = saved_cache
 
         adaptation_benefit = baseline_loss_val - loss.item()
 
