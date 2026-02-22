@@ -705,12 +705,12 @@ class RealEpisodicDataset(Dataset):
         rng = random.Random(idx)
         pad_id = self.tokenizer.eos_token_id or 0
 
-        # Source-balanced sampling: pick a random source, then a
-        # random example from it.
-        selected = [
-            rng.choice(rng.choice(self.source_buckets))
-            for _ in range(self.num_problems)
-        ]
+        # Same-source sampling: pick ONE source for the whole episode,
+        # then draw all problems from it.  This ensures the adapt
+        # problems (1-5) are in the same domain as the eval problems
+        # (6-8), so adaptation actually helps.
+        source = rng.choice(self.source_buckets)
+        selected = [rng.choice(source) for _ in range(self.num_problems)]
 
         all_tokens: list[int] = []
         all_labels: list[int] = []
