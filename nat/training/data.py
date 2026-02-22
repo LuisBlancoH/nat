@@ -430,16 +430,14 @@ def collate_episodic(batch: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Collate function for episodic datasets.
 
-    Stacks ``input_ids`` and ``labels``, and uses the problem_spans from
-    the first item (they're identical across all items in a batch
-    because both ``SyntheticEpisodicDataset`` and
-    ``RealEpisodicDataset`` use fixed-size slots with uniform span
-    layout).
+    Stacks ``input_ids`` and ``labels``.  Keeps per-example
+    ``problem_spans`` as a list-of-lists since densely-packed episodes
+    have different span positions per example.
     """
     return {
         "input_ids": torch.stack([b["input_ids"] for b in batch]),
         "labels": torch.stack([b["labels"] for b in batch]),
-        "problem_spans": batch[0]["problem_spans"],
+        "problem_spans": [b["problem_spans"] for b in batch],
     }
 
 
@@ -647,16 +645,6 @@ class RealEpisodicDataset(Dataset):
                 "dataset availability."
             )
 
-        # Pre-compute fixed problem spans (identical for every episode)
-        tokens_per_problem = seq_len // num_problems
-        self.problem_spans: list[tuple[int, int]] = []
-        for i in range(num_problems):
-            block_start = i * tokens_per_problem
-            sol_start = block_start + tokens_per_problem // 2
-            sol_end = block_start + tokens_per_problem
-            sol_start = max(sol_start, 1)
-            self.problem_spans.append((sol_start, sol_end))
-
         total = sum(len(b) for b in self.source_buckets)
         logger.info(
             f"Loaded {total} QA pairs across "
@@ -700,67 +688,81 @@ class RealEpisodicDataset(Dataset):
         return self.num_episodes
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        """Build one episode: num_problems QA pairs in fixed-size slots.
+        """Build one episode: num_problems QA pairs packed densely.
 
-        Each slot is ``seq_len // num_problems`` tokens.  The first half
-        of the slot holds the question tokens, the second half holds the
-        answer tokens, mirroring the layout used by
-        ``SyntheticEpisodicDataset`` so that ``collate_episodic`` can
-        use a single ``problem_spans`` for the whole batch.
+        Problems are packed back-to-back with no fixed slot boundaries.
+        Each problem is tokenised as::
+
+            Question: {q}\\nAnswer: {a}\\n\\n
+
+        ``problem_spans`` records the actual ``(sol_start, sol_end)``
+        positions of each answer in token space, so the loss is
+        computed on exactly the answer tokens (no padding waste).
+
+        Remaining space at the end is padded with ``pad_id`` and
+        labelled ``-100``.
         """
         rng = random.Random(idx)
-
-        slot_size = self.seq_len // self.num_problems
-        q_budget = slot_size // 2          # first half → question
-        a_budget = slot_size - q_budget    # second half → answer
         pad_id = self.tokenizer.eos_token_id or 0
 
-        all_tokens: list[int] = []
-        all_labels: list[int] = []
-
         # Source-balanced sampling: pick a random source, then a
-        # random example from it — every source gets equal weight
-        # regardless of its size.
+        # random example from it.
         selected = [
             rng.choice(rng.choice(self.source_buckets))
             for _ in range(self.num_problems)
         ]
 
+        all_tokens: list[int] = []
+        all_labels: list[int] = []
+        problem_spans: list[tuple[int, int]] = []
+
         for q, a in selected:
             q_tokens = self.tokenizer.encode(
-                f"Question: {q}\nAnswer: ", add_special_tokens=False
-            )[:q_budget]
+                f"Question: {q}\nAnswer: ", add_special_tokens=False,
+            )
             a_tokens = self.tokenizer.encode(
-                f"{a}\n\n", add_special_tokens=False
-            )[:a_budget]
-
-            q_pad_len = q_budget - len(q_tokens)
-            a_pad_len = a_budget - len(a_tokens)
-
-            # input_ids: question + padding + answer + padding
-            slot = (
-                q_tokens + [pad_id] * q_pad_len
-                + a_tokens + [pad_id] * a_pad_len
+                f"{a}\n\n", add_special_tokens=False,
             )
-            # labels: -100 for question & padding, real ids for answer only
-            slot_labels = (
-                [-100] * q_budget
-                + a_tokens + [-100] * a_pad_len
-            )
-            all_tokens.extend(slot)
-            all_labels.extend(slot_labels)
 
-        # Handle rounding remainder
-        if len(all_tokens) < self.seq_len:
-            all_tokens.extend([pad_id] * (self.seq_len - len(all_tokens)))
-            all_labels.extend([-100] * (self.seq_len - len(all_labels)))
-        all_tokens = all_tokens[:self.seq_len]
-        all_labels = all_labels[:self.seq_len]
+            sol_start = len(all_tokens) + len(q_tokens)
+            # Ensure sol_start >= 1 (we need logits at sol_start - 1)
+            sol_start = max(sol_start, 1)
+            sol_end = sol_start + len(a_tokens)
+
+            # Stop if this problem would overflow seq_len
+            if sol_end > self.seq_len:
+                # Try to fit a truncated version
+                remaining = self.seq_len - len(all_tokens)
+                if remaining > len(q_tokens) + 1:
+                    # Truncate answer to fit
+                    a_budget = remaining - len(q_tokens)
+                    a_tokens = a_tokens[:a_budget]
+                    sol_end = sol_start + len(a_tokens)
+                else:
+                    break  # no room for even the question
+
+            all_tokens.extend(q_tokens)
+            all_tokens.extend(a_tokens)
+
+            all_labels.extend([-100] * len(q_tokens))
+            all_labels.extend(a_tokens)
+
+            problem_spans.append((sol_start, sol_end))
+
+        # Pad to seq_len
+        pad_len = self.seq_len - len(all_tokens)
+        if pad_len > 0:
+            all_tokens.extend([pad_id] * pad_len)
+            all_labels.extend([-100] * pad_len)
+
+        # Safety truncate (shouldn't happen but defensive)
+        all_tokens = all_tokens[: self.seq_len]
+        all_labels = all_labels[: self.seq_len]
 
         return {
             "input_ids": torch.tensor(all_tokens, dtype=torch.long),
             "labels": torch.tensor(all_labels, dtype=torch.long),
-            "problem_spans": self.problem_spans,
+            "problem_spans": problem_spans,
         }
 
 

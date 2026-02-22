@@ -79,7 +79,7 @@ logger = logging.getLogger(__name__)
 def compute_episodic_loss(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
-    problem_spans: list[tuple[int, int]],
+    problem_spans: list[tuple[int, int]] | list[list[tuple[int, int]]],
     improvement_weight: float = 0.1,
     labels: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, list[float], torch.Tensor]:
@@ -91,9 +91,10 @@ def compute_episodic_loss(
     logits : Tensor, shape ``(batch, seq_len, vocab_size)``
     input_ids : LongTensor, shape ``(batch, seq_len)``
         Used as labels (next-token prediction) when ``labels`` is None.
-    problem_spans : list[(sol_start, sol_end)]
+    problem_spans : list[(sol_start, sol_end)] or list[list[(sol_start, sol_end)]]
         Token index ranges for each solution.  Loss is computed only
-        over solution tokens.
+        over solution tokens.  Accepts either shared spans (flat list)
+        or per-example spans (list of lists).
     improvement_weight : float
         Coefficient for the improvement bonus term.
     labels : LongTensor, shape ``(batch, seq_len)``, optional
@@ -107,22 +108,45 @@ def compute_episodic_loss(
     improvement : scalar Tensor
     """
     targets = labels if labels is not None else input_ids
+    batch_size = logits.shape[0]
+
+    # Normalise to per-example spans (list of lists)
+    if problem_spans and isinstance(problem_spans[0], tuple):
+        per_example_spans = [problem_spans] * batch_size  # type: ignore[list-item]
+    else:
+        per_example_spans = problem_spans  # type: ignore[assignment]
+
+    # Determine number of problems (max across batch)
+    max_problems = max(
+        (len(spans) for spans in per_example_spans), default=0,
+    )
+    if max_problems == 0:
+        zero = torch.tensor(0.0, device=logits.device, requires_grad=True)
+        return zero, [], zero
+
+    # Compute per-problem loss (averaged across batch elements)
     problem_losses: list[torch.Tensor] = []
+    for prob_idx in range(max_problems):
+        batch_losses: list[torch.Tensor] = []
+        for b in range(batch_size):
+            if prob_idx >= len(per_example_spans[b]):
+                continue
+            sol_start, sol_end = per_example_spans[b][prob_idx]
+            sol_logits = logits[b, sol_start - 1 : sol_end - 1, :]
+            sol_labels = targets[b, sol_start:sol_end]
 
-    for sol_start, sol_end in problem_spans:
-        # Shift: logits at position t predict token at position t+1
-        sol_logits = logits[:, sol_start - 1 : sol_end - 1, :]
-        sol_labels = targets[:, sol_start:sol_end]
+            if sol_logits.numel() == 0 or sol_labels.numel() == 0:
+                continue
 
-        if sol_logits.numel() == 0 or sol_labels.numel() == 0:
-            continue
+            loss_i = F.cross_entropy(
+                sol_logits.reshape(-1, sol_logits.size(-1)),
+                sol_labels.reshape(-1),
+                ignore_index=-100,
+            )
+            batch_losses.append(loss_i)
 
-        loss_i = F.cross_entropy(
-            sol_logits.reshape(-1, sol_logits.size(-1)),
-            sol_labels.reshape(-1),
-            ignore_index=-100,
-        )
-        problem_losses.append(loss_i)
+        if batch_losses:
+            problem_losses.append(torch.stack(batch_losses).mean())
 
     if len(problem_losses) == 0:
         zero = torch.tensor(0.0, device=logits.device, requires_grad=True)
@@ -152,49 +176,71 @@ def compute_episodic_loss(
 def train_one_episodic_step(
     model,
     input_ids: torch.Tensor,
-    problem_spans: list[tuple[int, int]],
+    problem_spans: list[tuple[int, int]] | list[list[tuple[int, int]]],
     optimizer: torch.optim.Optimizer,
     config,
     labels: torch.Tensor | None = None,
+    compute_baseline: bool = False,
 ) -> dict[str, Any]:
     """
     One Phase-2 training step (one episode).
 
-    Unlike Phase 1, here we do NOT split adapt/eval — the entire
-    episode is both adaptation *and* evaluation.  The model adapts
-    while processing problems 1..K, and we measure per-problem loss
-    to see if it improves.
+    The episode is split into **adapt** and **eval** portions at the
+    problem level:
+
+    - **Adapt** (first ``adapt_problems`` problems): the model forwards
+      these tokens chunk-by-chunk so adaptation fires and fast weights
+      update, but no loss is computed.
+    - **Eval** (remaining problems): the model continues to forward
+      chunk-by-chunk (adaptation still fires), and logits are collected
+      to compute the episodic loss with improvement bonus.
+
+    This mirrors Phase 1's 75/25 adapt/eval split: the gradient
+    exclusively rewards *adapted* performance, giving a cleaner
+    meta-learning signal.
 
     Parameters
     ----------
     model : NATModel
     input_ids : LongTensor ``(batch, seq_len)``
-    problem_spans : list[(sol_start, sol_end)]
+    problem_spans : list[(sol_start, sol_end)] or list[list[(sol_start, sol_end)]]
+        Per-example problem spans (list of lists) or shared spans
+        (flat list, broadcast to all batch elements).
     optimizer : Optimizer on ``model.get_trainable_parameters()``
     config : NATConfig
     labels : LongTensor ``(batch, seq_len)``, optional
         If provided, positions set to ``-100`` are excluded from loss.
+    compute_baseline : bool
+        If True, compute baseline loss (no adaptation) for diagnostics.
 
     Returns
     -------
     dict with ``"loss"``, ``"per_problem_losses"``, ``"improvement"``,
-    ``"num_problems"``.
+    ``"num_problems"``, and optionally ``"baseline_loss"`` and
+    ``"adaptation_benefit"``.
     """
     batch_size, seq_len = input_ids.shape
     device = input_ids.device
+
+    # ---- Normalise spans to per-example format ----
+    if problem_spans and isinstance(problem_spans[0], tuple):
+        per_example_spans: list[list[tuple[int, int]]] = [
+            problem_spans  # type: ignore[list-item]
+        ] * batch_size
+    else:
+        per_example_spans = problem_spans  # type: ignore[assignment]
+
+    num_problems = max(len(s) for s in per_example_spans)
+    adapt_problems = getattr(config, "adapt_problems_p2", num_problems * 5 // 8)
+    adapt_problems = min(adapt_problems, num_problems - 1)  # ≥1 eval problem
 
     # ---- Reset fast weights for the episode ----
     model.start_session(batch_size)
 
     # ---- Forward through the entire episode ----
-    # Process in chunks so adaptation fires at the right cadence.
-    # We accumulate hidden states via multiple forward calls and the
-    # fast-weight self-modification graph stays connected.
     chunk_size = config.adapt_every_n
     num_chunks = 0
 
-    # We need logits for the WHOLE sequence to compute per-problem loss.
-    # Process chunk-by-chunk, collect logits, then compute loss once.
     all_logits_chunks: list[torch.Tensor] = []
 
     for chunk_start in range(0, seq_len, chunk_size):
@@ -207,15 +253,58 @@ def train_one_episodic_step(
         _maybe_truncate(model, num_chunks, config)
         num_chunks += 1
 
-    # Reconstruct full logits
     all_logits = torch.cat(all_logits_chunks, dim=1)  # (batch, seq_len, vocab)
 
-    # ---- Compute episodic loss ----
+    # ---- Compute episodic loss on EVAL problems only ----
+    eval_spans = [spans[adapt_problems:] for spans in per_example_spans]
+
     improvement_weight = getattr(config, "improvement_weight", 0.1)
     total_loss, per_problem_losses, improvement = compute_episodic_loss(
-        all_logits, input_ids, problem_spans, improvement_weight,
+        all_logits, input_ids, eval_spans, improvement_weight,
         labels=labels,
     )
+
+    # ---- Baseline: eval loss without adaptation ----
+    baseline_loss_val = None
+    adaptation_benefit = None
+
+    if compute_baseline:
+        saved_A_a = model.adaptive_A.fast_A
+        saved_B_a = model.adaptive_A.fast_B
+        saved_A_b = model.adaptive_B.fast_A
+        saved_B_b = model.adaptive_B.fast_B
+        saved_step = model._step_counter
+
+        with torch.no_grad():
+            # Fresh session — reset fast weights + KV cache
+            model.start_session(batch_size)
+
+            # Forward full sequence with suppress_adapt to build clean
+            # KV cache and collect un-adapted logits.
+            baseline_chunks: list[torch.Tensor] = []
+            for chunk_start in range(0, seq_len, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, seq_len)
+                chunk_ids = input_ids[:, chunk_start:chunk_end]
+                out = model(chunk_ids, suppress_adapt=True)
+                baseline_chunks.append(out["logits"])
+
+            baseline_logits = torch.cat(baseline_chunks, dim=1)
+            _, baseline_per_prob, _ = compute_episodic_loss(
+                baseline_logits, input_ids, eval_spans, 0.0,
+                labels=labels,
+            )
+            if baseline_per_prob:
+                baseline_loss_val = sum(baseline_per_prob) / len(baseline_per_prob)
+
+        # Restore adapted state
+        model.adaptive_A.fast_A = saved_A_a
+        model.adaptive_A.fast_B = saved_B_a
+        model.adaptive_B.fast_A = saved_A_b
+        model.adaptive_B.fast_B = saved_B_b
+        model._step_counter = saved_step
+
+        if baseline_loss_val is not None:
+            adaptation_benefit = baseline_loss_val - total_loss.item()
 
     # ---- Backward + optimiser ----
     if torch.isnan(total_loss) or torch.isinf(total_loss):
@@ -236,12 +325,16 @@ def train_one_episodic_step(
         )
     optimizer.step()
 
-    return {
+    metrics: dict[str, Any] = {
         "loss": total_loss.item(),
         "per_problem_losses": per_problem_losses,
         "improvement": improvement.item(),
         "num_problems": len(per_problem_losses),
     }
+    if compute_baseline:
+        metrics["baseline_loss"] = baseline_loss_val
+        metrics["adaptation_benefit"] = adaptation_benefit
+    return metrics
 
 
 # ------------------------------------------------------------------ #
@@ -358,9 +451,14 @@ def train_phase2(
         if labels is not None:
             labels = labels.to(device)
 
+        do_baseline = (
+            (episode_idx % log_every == 0) or episode_idx <= 10
+        )
+
         metrics = train_one_episodic_step(
             model, input_ids, problem_spans, optimizer, config,
             labels=labels,
+            compute_baseline=do_baseline,
         )
         scheduler.step()
 
@@ -390,12 +488,20 @@ def train_phase2(
             per_prob = metrics["per_problem_losses"]
             prob_str = " → ".join(f"{l:.3f}" for l in per_prob) if per_prob else "n/a"
 
+            baseline_str = ""
+            if metrics.get("baseline_loss") is not None:
+                baseline_str = (
+                    f"  baseline={metrics['baseline_loss']:.4f}"
+                    f"  benefit={metrics['adaptation_benefit']:.4f}"
+                )
+
             logger.info(
                 f"[Episode {episode_idx}/{num_episodes}]  "
                 f"loss={avg_loss:.4f}  improvement={avg_impr:.4f}  "
                 f"lr={scheduler.get_last_lr()[0]:.2e}  "
                 f"eps/s={eps_per_sec:.1f}  "
                 f"per-problem: [{prob_str}]"
+                f"{baseline_str}"
             )
 
             if use_wandb:
@@ -411,6 +517,9 @@ def train_phase2(
                 # Log individual problem losses
                 for i, l in enumerate(per_prob):
                     log_dict[f"problem_{i}_loss"] = l
+                if metrics.get("baseline_loss") is not None:
+                    log_dict["baseline_loss"] = metrics["baseline_loss"]
+                    log_dict["adaptation_benefit"] = metrics["adaptation_benefit"]
                 log_dict.update(model.diagnostics())
                 wandb.log(log_dict)
 

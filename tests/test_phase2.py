@@ -73,6 +73,7 @@ class Phase2TestConfig:
     num_episodes_p2: int = 10
     num_problems_per_episode: int = 4
     improvement_weight: float = 0.1
+    adapt_problems_p2: int = 2
     batch_size: int = 2
     seq_len: int = 32
     truncated_bptt: int = 0
@@ -210,7 +211,10 @@ class TestEpisodicDataModule:
         batch_list = [ds[i] for i in range(config.batch_size)]
         batch = collate_episodic(batch_list)
         assert batch["input_ids"].shape == (config.batch_size, config.seq_len)
-        assert batch["problem_spans"] == ds[0]["problem_spans"]
+        # collate_episodic now returns per-example spans (list of lists)
+        assert isinstance(batch["problem_spans"], list)
+        assert len(batch["problem_spans"]) == config.batch_size
+        assert batch["problem_spans"][0] == ds[0]["problem_spans"]
 
 
 # ============================================================
@@ -337,7 +341,8 @@ class TestSingleEpisodicStep:
             config,
         )
         assert "per_problem_losses" in metrics
-        assert len(metrics["per_problem_losses"]) == config.num_problems_per_episode
+        expected_eval = config.num_problems_per_episode - config.adapt_problems_p2
+        assert len(metrics["per_problem_losses"]) == expected_eval
 
     def test_step_reports_improvement(self, model, dummy_batch, optimizer, config):
         model.train()
@@ -360,7 +365,8 @@ class TestSingleEpisodicStep:
             optimizer,
             config,
         )
-        assert metrics["num_problems"] == config.num_problems_per_episode
+        expected_eval = config.num_problems_per_episode - config.adapt_problems_p2
+        assert metrics["num_problems"] == expected_eval
 
 
 # ============================================================

@@ -43,10 +43,11 @@ class NATConfig:
     num_episodes_p2: int = 30000
     improvement_weight: float = 0.1
     num_problems_per_episode: int = 8
+    adapt_problems_p2: int = 5
 
     # Training - Phase 3
     lr_phase3: float = 1e-4
-    num_runs_p3: int = 100
+    num_runs_p3: int = 500
     sessions_per_domain_p3: int = 20
     forgetting_test_sessions_p3: int = 5
     p3_truncate_sessions: int = 4
