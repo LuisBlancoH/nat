@@ -37,6 +37,11 @@ from nat.model.utils import (
     log_device_memory,
 )
 
+try:
+    from transformers import DynamicCache
+except ImportError:
+    DynamicCache = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,17 +53,29 @@ def _make_causal_mask(
     seq_len: int,
     dtype: torch.dtype,
     device: torch.device,
+    past_len: int = 0,
 ) -> torch.Tensor:
     """
-    Build a lower-triangular causal mask.
+    Build a causal attention mask.
 
-    Returns shape ``(1, 1, seq_len, seq_len)`` with 0 for attend and
-    ``-inf`` for masked positions.  Compatible with HuggingFace's additive
-    attention mask convention.
+    When ``past_len > 0`` (KV cache in use), the mask allows the current
+    chunk to attend to all cached positions (causal by construction since
+    they precede the current chunk) and applies standard causal masking
+    within the current chunk.
+
+    Returns shape ``(1, 1, seq_len, past_len + seq_len)`` with 0 for
+    attend and ``-inf`` for masked positions.
     """
-    mask = torch.full((seq_len, seq_len), float("-inf"), dtype=dtype, device=device)
-    mask = torch.triu(mask, diagonal=1)
-    return mask.unsqueeze(0).unsqueeze(0)  # (1, 1, seq_len, seq_len)
+    total_len = past_len + seq_len
+    # All cached positions are attendable (they are in the past).
+    mask = torch.zeros((seq_len, total_len), dtype=dtype, device=device)
+    # Apply causal masking within the current chunk.
+    causal_part = torch.triu(
+        torch.full((seq_len, seq_len), float("-inf"), dtype=dtype, device=device),
+        diagonal=1,
+    )
+    mask[:, past_len:] = causal_part
+    return mask.unsqueeze(0).unsqueeze(0)
 
 
 # ------------------------------------------------------------------ #
@@ -163,6 +180,8 @@ class NATModel(nn.Module):
 
         self.adapt_every_n = config.adapt_every_n
         self._step_counter = 0
+        self._use_kv_cache = DynamicCache is not None
+        self._kv_cache = None
 
         # -------------------------------------------------------------- #
         # Device-specific optimisations                                    #
@@ -291,16 +310,18 @@ class NATModel(nn.Module):
     # ------------------------------------------------------------------ #
 
     def start_session(self, batch_size: int = 1) -> None:
-        """Reset fast weights at the start of a new session / episode."""
+        """Reset fast weights and KV cache at the start of a new session / episode."""
         self.adaptive_A.reset_fast_weights(batch_size)
         self.adaptive_B.reset_fast_weights(batch_size)
         self._step_counter = 0
+        self._kv_cache = DynamicCache() if self._use_kv_cache else None
 
     def end_session(self) -> None:
         """Consolidate learned fast weights, then partial-reset."""
         self.consolidation.consolidate([self.adaptive_A, self.adaptive_B])
         self.adaptive_A.partial_reset(self.config.session_reset_alpha)
         self.adaptive_B.partial_reset(self.config.session_reset_alpha)
+        self._kv_cache = None  # free cache memory
 
     # ------------------------------------------------------------------ #
     # Forward pass                                                         #
@@ -357,8 +378,17 @@ class NATModel(nn.Module):
                 hidden_states, position_ids
             )
 
+        # ---- KV cache context length ----
+        past_len = (
+            self._kv_cache.get_seq_length()
+            if self._kv_cache is not None
+            else 0
+        )
+
         # ---- Causal mask ----
-        causal_mask = _make_causal_mask(seq_len, hidden_states.dtype, device)
+        causal_mask = _make_causal_mask(
+            seq_len, hidden_states.dtype, device, past_len=past_len,
+        )
 
         # ---- Update step counter & determine whether to adapt ----
         self._step_counter += seq_len
@@ -381,9 +411,11 @@ class NATModel(nn.Module):
             layer_kwargs: dict[str, Any] = {
                 "attention_mask": causal_mask,
                 "position_ids": position_ids,
-                "use_cache": False,
+                "use_cache": self._kv_cache is not None,
                 "cache_position": cache_position,
             }
+            if self._kv_cache is not None:
+                layer_kwargs["past_key_values"] = self._kv_cache
             if position_embeddings is not None:
                 layer_kwargs["position_embeddings"] = position_embeddings
 
@@ -410,6 +442,9 @@ class NATModel(nn.Module):
                 h_float = hidden_states.float()
                 h_float = self.consolidation(h_float)
                 hidden_states = h_float.to(base_dtype)
+
+        # ---- Detach KV cache to keep gradients only through fast weights ----
+        self._detach_kv_cache()
 
         # ---- Final norm ----
         hidden_states = self._transformer.norm(hidden_states)
@@ -470,6 +505,27 @@ class NATModel(nn.Module):
     # Diagnostics                                                          #
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # KV cache helpers                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _detach_kv_cache(self) -> None:
+        """Detach all cached K/V tensors so gradients flow only through fast weights."""
+        if self._kv_cache is None:
+            return
+        # Modern transformers (≥4.45): cache.layers list
+        if hasattr(self._kv_cache, "layers"):
+            for layer_cache in self._kv_cache.layers:
+                if hasattr(layer_cache, "keys") and layer_cache.keys is not None:
+                    layer_cache.keys = layer_cache.keys.detach()
+                    layer_cache.values = layer_cache.values.detach()
+        # Older transformers: key_cache / value_cache lists
+        elif hasattr(self._kv_cache, "key_cache"):
+            for i in range(len(self._kv_cache.key_cache)):
+                if isinstance(self._kv_cache.key_cache[i], torch.Tensor):
+                    self._kv_cache.key_cache[i] = self._kv_cache.key_cache[i].detach()
+                    self._kv_cache.value_cache[i] = self._kv_cache.value_cache[i].detach()
+
     def diagnostics(self) -> dict[str, Any]:
         """Return a dict of diagnostic stats for logging."""
         d: dict[str, Any] = {}
@@ -480,4 +536,6 @@ class NATModel(nn.Module):
         d.update({f"consolidation/{k}": v
                   for k, v in self.consolidation.consolidated_weight_stats().items()})
         d["step_counter"] = self._step_counter
+        if self._kv_cache is not None:
+            d["kv_cache_tokens"] = self._kv_cache.get_seq_length()
         return d
