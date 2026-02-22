@@ -176,22 +176,27 @@ def train_one_episode(
     adaptation_benefit = None
 
     if compute_baseline:
-        # Snapshot current adapted fast weights
+        # Snapshot current adapted fast weights + position counter
         saved_A_a = model.adaptive_A.fast_A
         saved_B_a = model.adaptive_A.fast_B
         saved_A_b = model.adaptive_B.fast_A
         saved_B_b = model.adaptive_B.fast_B
+        saved_step = model._step_counter
 
         with torch.no_grad():
-            model.start_session(batch_size)  # reset to init
+            model.start_session(batch_size)  # reset fast weights to init
+            # Advance position counter so baseline uses the same absolute
+            # positions as the adapted eval (only fast weights should differ).
+            model._step_counter = adapt_len
             baseline_output = model(eval_ids, labels=eval_labels)
             baseline_loss_val = baseline_output["loss"].item()
 
-        # Restore adapted weights (for correct backward pass)
+        # Restore adapted weights + position counter for correct backward
         model.adaptive_A.fast_A = saved_A_a
         model.adaptive_A.fast_B = saved_B_a
         model.adaptive_B.fast_A = saved_A_b
         model.adaptive_B.fast_B = saved_B_b
+        model._step_counter = saved_step
 
         adaptation_benefit = baseline_loss_val - loss.item()
 
