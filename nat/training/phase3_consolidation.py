@@ -84,6 +84,11 @@ from torch.utils.data import DataLoader, Dataset
 
 from nat.training.phase1_meta_learn import _save_checkpoint
 
+try:
+    from transformers import DynamicCache
+except ImportError:
+    DynamicCache = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -858,6 +863,11 @@ def train_one_run(
             _partial_reset_differentiable(model, alpha)
 
         model._step_counter = 0
+        # Fresh KV cache per session (each session is a new document)
+        if DynamicCache is not None:
+            model._kv_cache = DynamicCache()
+        else:
+            model._kv_cache = None
 
         # ---- Fetch domain data ----
         if domain not in domain_iters:
