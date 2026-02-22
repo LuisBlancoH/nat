@@ -342,7 +342,13 @@ class NATModel(nn.Module):
         base_dtype = hidden_states.dtype
 
         # ---- Position IDs / Rotary embeddings ----
-        cache_position = torch.arange(seq_len, device=device)
+        # Use _step_counter as the offset so that successive chunks
+        # within an episode get correct absolute positions (0-31,
+        # 32-63, … 1536-2047) instead of always starting at 0.
+        pos_offset = self._step_counter
+        cache_position = torch.arange(
+            pos_offset, pos_offset + seq_len, device=device
+        )
         position_ids = cache_position.unsqueeze(0).expand(batch_size, -1)
 
         position_embeddings = None
@@ -354,7 +360,7 @@ class NATModel(nn.Module):
         # ---- Causal mask ----
         causal_mask = _make_causal_mask(seq_len, hidden_states.dtype, device)
 
-        # ---- Determine whether to adapt this step ----
+        # ---- Update step counter & determine whether to adapt ----
         self._step_counter += seq_len
         do_adapt = (self._step_counter % self.adapt_every_n) < seq_len
 
