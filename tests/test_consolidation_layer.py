@@ -123,10 +123,10 @@ class TestForwardPass:
         """With W_c = 0, memory readout is zero; output ≈ h_t (identity)."""
         out = layer(dummy_input)
         # With zero consolidated weights, memory_raw is all zeros.
-        # gate ≈ 0.047, so output ≈ h_t + 0.047 * LN(read_net(0)).
-        # Should be close to the input (within ~15%).
+        # gate ≈ 0.27, so output ≈ h_t + 0.27 * LN(read_net(0)).
+        # Moderate perturbation — max diff should be bounded.
         diff = (out - dummy_input).abs().max().item()
-        assert diff < 0.5, f"Output too far from identity: max_diff={diff}"
+        assert diff < 1.5, f"Output too far from identity: max_diff={diff}"
 
     def test_output_changes_after_consolidation(
         self, layer, dummy_input, adaptive_layers
@@ -293,7 +293,7 @@ class TestConsolidation:
 
 class TestGateInit:
     def test_initial_gate_not_zero(self, layer, dummy_input):
-        """Gate bias = -3.0 → sigmoid ≈ 0.047 — not stuck at 0."""
+        """Gate bias = -1.0 → sigmoid ≈ 0.27 — not stuck at 0."""
         # Give non-zero consolidated weights so memory readout is non-trivial
         layer.W_c_A = torch.randn_like(layer.W_c_A) * 0.1
         layer.W_c_B = torch.randn_like(layer.W_c_B) * 0.1
@@ -304,13 +304,13 @@ class TestGateInit:
         assert diff > 1e-8, "Gate appears stuck at 0"
 
     def test_gate_bias_value(self, layer):
-        """Verify the gate's final linear layer has bias = -3.0."""
+        """Verify the gate's final linear layer has bias = -1.0."""
         # gate_net[-2] is the last Linear (before Sigmoid)
         last_linear = layer.gate_net[-2]
         assert isinstance(last_linear, nn.Linear)
         assert torch.allclose(
             last_linear.bias,
-            torch.tensor([-3.0]),
+            torch.tensor([-1.0]),
             atol=1e-6,
         )
 

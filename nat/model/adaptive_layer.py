@@ -111,18 +111,19 @@ class AdaptiveMemoryLayer(nn.Module):
 
         # --- Gate network ---
         # Decides how much to trust the memory readout vs. the pass-through.
-        # Bias initialised to -3.0 so initial gate ≈ 0.047 — small
-        # perturbation to frozen model, but sigmoid gradient (~0.045)
-        # is 7× stronger than at -5.0 (~0.007), letting the gate open
-        # at a practical training speed.  LayerNorm on the memory
-        # branch ensures the 5% injection is well-scaled.
+        # Bias initialised to -1.0 so initial gate ≈ 0.27.  With LayerNorm
+        # on the memory branch (not the output), this injects 27% of a
+        # unit-variance normalised readout — a moderate perturbation that
+        # gives the sigmoid gradient (~0.20) enough strength for the
+        # write/key/lr networks to learn quickly.  If adaptation is not
+        # useful the gate will close; if it is, it stays open.
         self.gate_net = nn.Sequential(
             nn.Linear(d_model * 2, d_hidden),
             nn.GELU(),
             nn.Linear(d_hidden, 1),
             nn.Sigmoid(),
         )
-        nn.init.constant_(self.gate_net[-2].bias, -3.0)
+        nn.init.constant_(self.gate_net[-2].bias, -1.0)
 
         # --- State predictor ---
         # Predicts the next hidden state for surprise computation.

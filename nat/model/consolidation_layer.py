@@ -71,15 +71,16 @@ class ConsolidationLayer(nn.Module):
 
         # --- Gate network ---
         # Decides how much to trust consolidated memory vs. pass-through.
-        # Bias initialised to -3.0 → initial gate ≈ 0.047 (small but
-        # trainable — sigmoid gradient ~0.045, 7× stronger than -5.0).
+        # Bias initialised to -1.0 → initial gate ≈ 0.27.  With LayerNorm
+        # on the memory branch, this is a moderate perturbation with strong
+        # sigmoid gradient (~0.20) for fast learning.
         self.gate_net = nn.Sequential(
             nn.Linear(d_model * 2, d_hidden),
             nn.GELU(),
             nn.Linear(d_hidden, 1),
             nn.Sigmoid(),
         )
-        nn.init.constant_(self.gate_net[-2].bias, -3.0)
+        nn.init.constant_(self.gate_net[-2].bias, -1.0)
 
         # Layer norm for output stability
         self.layer_norm = nn.LayerNorm(d_model)
