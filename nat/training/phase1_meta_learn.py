@@ -176,7 +176,7 @@ def train_one_episode(
     adaptation_benefit = None
 
     if compute_baseline:
-        # Snapshot current adapted fast weights, position counter, KV cache
+        # Snapshot current adapted state
         saved_A_a = model.adaptive_A.fast_A
         saved_B_a = model.adaptive_A.fast_B
         saved_A_b = model.adaptive_B.fast_A
@@ -185,10 +185,19 @@ def train_one_episode(
         saved_cache = model._kv_cache
 
         with torch.no_grad():
-            model.start_session(batch_size)  # reset fast weights + KV cache
-            # Advance position counter so baseline uses the same absolute
-            # positions as the adapted eval (only fast weights should differ).
-            model._step_counter = adapt_len
+            # Reset everything — fresh fast weights + fresh KV cache
+            model.start_session(batch_size)
+
+            # Forward the adaptation chunks WITHOUT adaptation to build
+            # a clean KV cache.  suppress_adapt=True prevents fast-weight
+            # updates, so read() acts as near-identity with init weights.
+            # Frozen layers 10+ see un-adapted hidden states → clean K/V.
+            for chunk_start in range(0, adapt_len, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, adapt_len)
+                chunk_ids = input_ids[:, chunk_start:chunk_end]
+                _ = model(chunk_ids, suppress_adapt=True)
+
+            # Now eval with init fast weights + full KV cache context
             baseline_output = model(eval_ids, labels=eval_labels)
             baseline_loss_val = baseline_output["loss"].item()
 

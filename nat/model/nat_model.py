@@ -332,6 +332,7 @@ class NATModel(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         labels: torch.Tensor | None = None,
+        suppress_adapt: bool = False,
     ) -> dict[str, Any]:
         """
         Forward pass with adaptive layer intervention.
@@ -346,6 +347,9 @@ class NATModel(nn.Module):
             1 = attend, 0 = masked.  If None, assumes all-attend.
         labels : LongTensor, shape ``(batch, seq_len)``, optional
             Shifted internally for next-token prediction.  ``-100`` is ignored.
+        suppress_adapt : bool
+            If True, force ``do_adapt=False`` so adaptation never fires.
+            Useful for building KV cache without modifying fast weights.
 
         Returns
         -------
@@ -392,7 +396,10 @@ class NATModel(nn.Module):
 
         # ---- Update step counter & determine whether to adapt ----
         self._step_counter += seq_len
-        do_adapt = (self._step_counter % self.adapt_every_n) < seq_len
+        do_adapt = (
+            not suppress_adapt
+            and (self._step_counter % self.adapt_every_n) < seq_len
+        )
 
         # ---- Iterate through decoder layers ----
         # Optionally wrap frozen layers in AMP autocast (CUDA only).
