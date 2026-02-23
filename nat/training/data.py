@@ -795,6 +795,7 @@ def build_phase2_dataloader(
     DataLoader
     """
     num_problems = getattr(config, "num_problems_per_episode", 8)
+    p2_batch = getattr(config, "batch_size_p2", config.batch_size)
 
     if synthetic:
         dataset = SyntheticEpisodicDataset(
@@ -805,7 +806,7 @@ def build_phase2_dataloader(
         )
         return DataLoader(
             dataset,
-            batch_size=config.batch_size,
+            batch_size=p2_batch,
             shuffle=True,
             drop_last=True,
             num_workers=0,
@@ -836,9 +837,7 @@ def build_phase2_dataloader(
 
     return DataLoader(
         dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-        drop_last=True,
+        batch_size=p2_batch,
         num_workers=0,
         collate_fn=collate_episodic,
     )

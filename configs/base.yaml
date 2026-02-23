@@ -30,6 +30,7 @@ num_episodes_p2: 30000
 improvement_weight: 0.1
 num_problems_per_episode: 8
 adapt_problems_p2: 5
+batch_size_p2: 2
 
 # Training - Phase 3
 lr_phase3: 1e-4
@@ -43,7 +44,7 @@ device: "auto"  # auto-detect: cuda > mps > cpu
 base_dtype: "bfloat16"
 
 # Performance (A100)
-gradient_checkpointing: true
+gradient_checkpointing: false
 compile_model: false
 tf32_matmul: true
 
