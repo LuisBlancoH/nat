@@ -452,21 +452,30 @@ def collate_episodic(batch: list[dict[str, Any]]) -> dict[str, Any]:
 
 class RealEpisodicDataset(Dataset):
     """
-    Episodic dataset built from real QA datasets.
+    Episodic dataset built from real QA datasets with context grouping.
 
     Loads questions from multiple HuggingFace datasets, formats them as
     ``Question: ...\\nAnswer: ...\\n\\n`` pairs, packs ``num_problems``
     per episode into a single tokenised sequence, and records
     ``problem_spans`` for per-problem loss computation.
 
-    Sources (~380 K QA pairs total, each loaded gracefully):
+    **Context grouping** — sources that support it group QA pairs by
+    topic / article / activity so that all problems within an episode
+    share related context.  This gives a much cleaner adaptation signal:
+    adapting on problems 1-5 about "anatomy" actually helps with eval
+    problems 6-8 about "anatomy".
+
+    Grouped sources:
+      - ``rajpurkar/squad``     — reading comprehension, grouped by article (~87 K)
+      - ``cais/mmlu``           — multi-domain knowledge, grouped by subject (~14 K)
+      - ``Rowan/hellaswag``     — commonsense completion, grouped by activity (~40 K)
+
+    Ungrouped sources (same-source sampling):
       - ``openai/gsm8k``        — grade-school math (~7.5 K)
       - ``allenai/ai2_arc``     — science reasoning, Easy + Challenge (~3.4 K)
-      - ``cais/mmlu``           — multi-domain knowledge (~14 K)
       - ``tau/commonsense_qa``  — commonsense reasoning (~10 K)
       - ``ybisk/piqa``          — physical intuition (~16 K)
       - ``google/boolq``        — yes / no reading comprehension (~9.4 K)
-      - ``Rowan/hellaswag``     — commonsense completion (~40 K)
       - ``allenai/sciq``        — science with explanations (~12 K)
       - ``allenai/openbookqa``  — open-book science QA (~5 K)
       - ``trivia_qa``           — trivia / factual recall (~138 K)
@@ -516,7 +525,7 @@ class RealEpisodicDataset(Dataset):
                 else ex["choices"]["text"][0],
             ),
         },
-        # ── Multi-domain knowledge ──
+        # ── Multi-domain knowledge (grouped by subject) ──
         {
             "name": "cais/mmlu",
             "config": "all",
@@ -528,6 +537,7 @@ class RealEpisodicDataset(Dataset):
                 and 0 <= ex["answer"] < len(ex["choices"])
                 else ex["choices"][0],
             ),
+            "grouper": lambda ex: ex.get("subject", ""),
         },
         # ── Commonsense reasoning ──
         {
@@ -563,7 +573,7 @@ class RealEpisodicDataset(Dataset):
                 "Yes" if ex["answer"] else "No",
             ),
         },
-        # ── Commonsense completion ──
+        # ── Commonsense completion (grouped by activity) ──
         {
             "name": "Rowan/hellaswag",
             "config": None,
@@ -574,6 +584,7 @@ class RealEpisodicDataset(Dataset):
                 if str(ex["label"]).isdigit()
                 else ex["endings"][0],
             ),
+            "grouper": lambda ex: ex.get("activity_label", ""),
         },
         # ── Science with explanations ──
         {
@@ -598,6 +609,19 @@ class RealEpisodicDataset(Dataset):
                 if ex["answerKey"] in ex["choices"]["label"]
                 else ex["choices"]["text"][0],
             ),
+        },
+        # ── Reading comprehension (grouped by article) ──
+        {
+            "name": "rajpurkar/squad",
+            "config": None,
+            "split": "train",
+            "formatter": lambda ex: (
+                f"Based on: \"{ex['context'][:400]}\"\n{ex['question']}",
+                ex["answers"]["text"][0]
+                if ex["answers"].get("text")
+                else "",
+            ),
+            "grouper": lambda ex: ex.get("title", ""),
         },
         # ── Trivia / factual recall ──
         {
@@ -627,6 +651,10 @@ class RealEpisodicDataset(Dataset):
         },
     ]
 
+    # Minimum group size — groups smaller than this are merged into
+    # an ungrouped fallback bucket for that source.
+    MIN_GROUP_SIZE = 4
+
     def __init__(
         self,
         tokenizer,
@@ -640,29 +668,42 @@ class RealEpisodicDataset(Dataset):
         self.seq_len = seq_len
         self.num_problems = num_problems
 
-        # Load QA pairs grouped by source for balanced sampling
-        self.source_buckets: list[list[tuple[str, str]]] = []
+        # Two-level structure: source_groups[i] is a list of context
+        # groups for source i.  Each context group is a list of
+        # (question, answer) pairs that share related context.
+        self.source_groups: list[list[list[tuple[str, str]]]] = []
         self._load_sources()
 
-        if not self.source_buckets:
+        if not self.source_groups:
             raise RuntimeError(
                 "No QA pairs loaded. Check network connectivity and "
                 "dataset availability."
             )
 
-        total = sum(len(b) for b in self.source_buckets)
+        total_groups = sum(len(sg) for sg in self.source_groups)
+        total_pairs = sum(
+            sum(len(g) for g in sg) for sg in self.source_groups
+        )
         logger.info(
-            f"Loaded {total} QA pairs across "
-            f"{len(self.source_buckets)} sources for Phase 2 "
-            f"(source-balanced sampling)"
+            f"Loaded {total_pairs} QA pairs in {total_groups} context "
+            f"groups across {len(self.source_groups)} sources for "
+            f"Phase 2 (context-grouped sampling)"
         )
 
     def _load_sources(self):
-        """Load QA pairs from HuggingFace datasets into per-source buckets."""
+        """Load QA pairs into per-source context groups.
+
+        For sources with a ``grouper`` function, QA pairs are split
+        into context groups (e.g. by article title, subject, or
+        activity).  Groups smaller than ``MIN_GROUP_SIZE`` are merged
+        into a fallback group for that source.
+
+        For sources without a ``grouper``, all QA pairs form a single
+        group (equivalent to same-source sampling).
+        """
         from datasets import load_dataset
 
         for src in self.SOURCES:
-            bucket: list[tuple[str, str]] = []
             try:
                 logger.info(f"Loading {src['name']} ({src['config']})...")
                 ds = load_dataset(
@@ -670,24 +711,72 @@ class RealEpisodicDataset(Dataset):
                     src["config"],
                     split=src["split"],
                 )
-                for example in ds:
-                    try:
-                        q, a = src["formatter"](example)
-                        if q and a:
-                            bucket.append((q.strip(), a.strip()))
-                    except (KeyError, IndexError, TypeError):
-                        continue
-                if bucket:
-                    self.source_buckets.append(bucket)
-                    logger.info(
-                        f"  → {src['name']}: {len(bucket)} pairs"
-                    )
+
+                grouper = src.get("grouper")
+
+                if grouper is None:
+                    # No grouping — one big group for this source
+                    bucket: list[tuple[str, str]] = []
+                    for example in ds:
+                        try:
+                            q, a = src["formatter"](example)
+                            if q and a:
+                                bucket.append((q.strip(), a.strip()))
+                        except (KeyError, IndexError, TypeError):
+                            continue
+                    if bucket:
+                        self.source_groups.append([bucket])
+                        logger.info(
+                            f"  → {src['name']}: {len(bucket)} pairs "
+                            f"(1 group)"
+                        )
+                    else:
+                        logger.warning(
+                            f"  → {src['name']}: loaded but 0 valid pairs"
+                        )
                 else:
-                    logger.warning(
-                        f"  → {src['name']}: loaded but 0 valid pairs"
-                    )
+                    # Group by key
+                    groups_dict: dict[str, list[tuple[str, str]]] = {}
+                    for example in ds:
+                        try:
+                            q, a = src["formatter"](example)
+                            key = grouper(example)
+                            if q and a and key:
+                                groups_dict.setdefault(key, []).append(
+                                    (q.strip(), a.strip())
+                                )
+                        except (KeyError, IndexError, TypeError):
+                            continue
+
+                    # Separate large groups from small ones
+                    groups: list[list[tuple[str, str]]] = []
+                    fallback: list[tuple[str, str]] = []
+                    for _key, pairs in groups_dict.items():
+                        if len(pairs) >= self.MIN_GROUP_SIZE:
+                            groups.append(pairs)
+                        else:
+                            fallback.extend(pairs)
+
+                    # Merge small groups into a fallback group
+                    if len(fallback) >= self.MIN_GROUP_SIZE:
+                        groups.append(fallback)
+
+                    if groups:
+                        self.source_groups.append(groups)
+                        total_pairs = sum(len(g) for g in groups)
+                        logger.info(
+                            f"  → {src['name']}: {total_pairs} pairs "
+                            f"({len(groups)} context groups)"
+                        )
+                    else:
+                        logger.warning(
+                            f"  → {src['name']}: loaded but 0 valid "
+                            f"groups"
+                        )
             except Exception as e:
-                logger.warning(f"  → {src['name']}: failed ({e}), skipping")
+                logger.warning(
+                    f"  → {src['name']}: failed ({e}), skipping"
+                )
 
     def __len__(self) -> int:
         return self.num_episodes
@@ -710,12 +799,15 @@ class RealEpisodicDataset(Dataset):
         rng = random.Random(idx)
         pad_id = self.tokenizer.eos_token_id or 0
 
-        # Same-source sampling: pick ONE source for the whole episode,
-        # then draw all problems from it.  This ensures the adapt
-        # problems (1-5) are in the same domain as the eval problems
-        # (6-8), so adaptation actually helps.
-        source = rng.choice(self.source_buckets)
-        selected = [rng.choice(source) for _ in range(self.num_problems)]
+        # Two-level context-grouped sampling:
+        # 1. Pick a source uniformly (preserves source-level balance)
+        # 2. Pick a context group within that source
+        # 3. Draw all problems from that group
+        # This ensures adapt problems (1-5) share context with eval
+        # problems (6-8), so adaptation genuinely helps.
+        source_groups = rng.choice(self.source_groups)
+        group = rng.choice(source_groups)
+        selected = [rng.choice(group) for _ in range(self.num_problems)]
 
         all_tokens: list[int] = []
         all_labels: list[int] = []
