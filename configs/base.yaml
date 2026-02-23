@@ -30,7 +30,7 @@ num_episodes_p2: 30000
 improvement_weight: 0.1
 num_problems_per_episode: 8
 adapt_problems_p2: 5
-batch_size_p2: 2
+batch_size_p2: 4
 
 # Training - Phase 3
 lr_phase3: 1e-4

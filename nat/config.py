@@ -44,7 +44,7 @@ class NATConfig:
     improvement_weight: float = 0.1
     num_problems_per_episode: int = 8
     adapt_problems_p2: int = 5
-    batch_size_p2: int = 2
+    batch_size_p2: int = 4
 
     # Training - Phase 3
     lr_phase3: float = 1e-4
