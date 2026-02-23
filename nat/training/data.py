@@ -476,6 +476,9 @@ class RealEpisodicDataset(Dataset):
       - ``aps/super_glue`` multirc— multi-sentence RC by paragraph (~27 K)
       - ``Rowan/hellaswag``       — commonsense by activity (~40 K)
       - ``trivia_qa`` (rc)        — trivia by entity (~138 K)
+      - ``next-tat/TAT-QA``       — numerical reasoning over tables (~13 K)
+      - ``emozilla/quality``      — long-doc knowledge QA (~6.5 K)
+      - ``allenai/wiqa``          — procedural/physical reasoning (~30 K)
 
     Falls back gracefully if a dataset is unavailable.
     """
@@ -633,6 +636,55 @@ class RealEpisodicDataset(Dataset):
                 and ex["entity_pages"].get("title")
                 else ""
             ),
+        },
+        # ── Numerical reasoning over tables (grouped by table context) ──
+        {
+            "name": "next-tat/TAT-QA",
+            "config": None,
+            "split": "train",
+            "exploder": lambda ex: [
+                (
+                    (
+                        f"Table: {ex['table']['table'][:400]}\n"
+                        f"Context: {' '.join(p['text'] for p in ex.get('paragraphs', []))[:300]}\n"
+                        f"{q['question']}"
+                    ),
+                    str(q.get("answer", "")) if q.get("answer") else "",
+                )
+                for q in ex.get("questions", [])
+                if q.get("question")
+            ],
+            "grouper": lambda ex: ex["table"]["uid"]
+            if ex.get("table") and ex["table"].get("uid")
+            else "",
+        },
+        # ── Long-document knowledge QA (grouped by article) ──
+        {
+            "name": "emozilla/quality",
+            "config": None,
+            "split": "train",
+            "formatter": lambda ex: (
+                f"Based on: \"{ex['article'][:400]}\"\n{ex['question']}",
+                ex["options"][ex["gold_label"] - 1]
+                if isinstance(ex.get("gold_label"), int)
+                and 1 <= ex["gold_label"] <= len(ex.get("options", []))
+                else ex.get("options", [""])[0],
+            ),
+            "grouper": lambda ex: ex.get("article_id", ""),
+        },
+        # ── Procedural / physical reasoning (grouped by process) ──
+        {
+            "name": "allenai/wiqa",
+            "config": None,
+            "split": "train",
+            "formatter": lambda ex: (
+                (
+                    f"Process: {' '.join(ex['question_para_step'][:5])}\n"
+                    f"{ex['question_stem']}"
+                ),
+                ex.get("answer_label", ""),
+            ),
+            "grouper": lambda ex: ex.get("metadata_para_id", ""),
         },
     ]
 
