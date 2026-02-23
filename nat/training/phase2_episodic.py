@@ -234,12 +234,28 @@ def train_one_episodic_step(
     adapt_problems = getattr(config, "adapt_problems_p2", num_problems * 5 // 8)
     adapt_problems = min(adapt_problems, num_problems - 1)  # ≥1 eval problem
 
+    # ---- Determine which chunks need logits ----
+    # Only keep logits for chunks overlapping eval problem spans.
+    # Adapt-only chunks still fire adaptation (updating fast weights)
+    # but their logits are discarded to save GPU memory.
+    eval_spans_raw = [spans[adapt_problems:] for spans in per_example_spans]
+
+    eval_start_token = seq_len
+    for spans in eval_spans_raw:
+        if spans:
+            # Need logits at sol_start - 1 for the shifted CE loss
+            eval_start_token = min(eval_start_token, spans[0][0] - 1)
+
     # ---- Reset fast weights for the episode ----
     model.start_session(batch_size)
 
     # ---- Forward through the entire episode ----
     chunk_size = config.adapt_every_n
     num_chunks = 0
+
+    # Align to chunk boundary
+    eval_logits_start_chunk = max(0, eval_start_token // chunk_size)
+    logits_offset = eval_logits_start_chunk * chunk_size
 
     all_logits_chunks: list[torch.Tensor] = []
 
@@ -248,20 +264,28 @@ def train_one_episodic_step(
         chunk_ids = input_ids[:, chunk_start:chunk_end]
 
         output = model(chunk_ids)
-        all_logits_chunks.append(output["logits"])
+
+        # Only keep logits that overlap with eval spans
+        if num_chunks >= eval_logits_start_chunk:
+            all_logits_chunks.append(output["logits"])
 
         _maybe_truncate(model, num_chunks, config)
         num_chunks += 1
 
-    all_logits = torch.cat(all_logits_chunks, dim=1)  # (batch, seq_len, vocab)
+    all_logits = torch.cat(all_logits_chunks, dim=1)
 
     # ---- Compute episodic loss on EVAL problems only ----
-    eval_spans = [spans[adapt_problems:] for spans in per_example_spans]
+    # Adjust span indices to match the truncated logits tensor
+    eval_spans = [
+        [(s - logits_offset, e - logits_offset) for s, e in spans]
+        for spans in eval_spans_raw
+    ]
 
     improvement_weight = getattr(config, "improvement_weight", 0.1)
     total_loss, per_problem_losses, improvement = compute_episodic_loss(
-        all_logits, input_ids, eval_spans, improvement_weight,
-        labels=labels,
+        all_logits, input_ids[:, logits_offset:], eval_spans,
+        improvement_weight,
+        labels=labels[:, logits_offset:] if labels is not None else None,
     )
 
     # ---- Baseline: eval loss without adaptation ----
@@ -275,24 +299,34 @@ def train_one_episodic_step(
         saved_B_b = model.adaptive_B.fast_B
         saved_step = model._step_counter
 
+        # Free KV cache before baseline to reduce peak memory
+        if hasattr(model, '_kv_cache'):
+            model._kv_cache = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         with torch.no_grad():
             # Fresh session — reset fast weights + KV cache
             model.start_session(batch_size)
 
-            # Forward full sequence with suppress_adapt to build clean
-            # KV cache and collect un-adapted logits.
+            # Only collect logits for eval portion (same optimisation)
             baseline_chunks: list[torch.Tensor] = []
+            bl_num_chunks = 0
             for chunk_start in range(0, seq_len, chunk_size):
                 chunk_end = min(chunk_start + chunk_size, seq_len)
                 chunk_ids = input_ids[:, chunk_start:chunk_end]
                 out = model(chunk_ids, suppress_adapt=True)
-                baseline_chunks.append(out["logits"])
+                if bl_num_chunks >= eval_logits_start_chunk:
+                    baseline_chunks.append(out["logits"])
+                bl_num_chunks += 1
 
             baseline_logits = torch.cat(baseline_chunks, dim=1)
             _, baseline_per_prob, _ = compute_episodic_loss(
-                baseline_logits, input_ids, eval_spans, 0.0,
-                labels=labels,
+                baseline_logits, input_ids[:, logits_offset:],
+                eval_spans, 0.0,
+                labels=labels[:, logits_offset:] if labels is not None else None,
             )
+            del baseline_logits, baseline_chunks
             if baseline_per_prob:
                 baseline_loss_val = sum(baseline_per_prob) / len(baseline_per_prob)
 
