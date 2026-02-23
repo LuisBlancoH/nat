@@ -303,6 +303,11 @@ def build_phase1_dataloader(
                 split="train",
                 streaming=True,
             )
+            # Shuffle the stream so consecutive episodes come from
+            # diverse topics.  buffer_size=10000 means ~10K documents
+            # are held in memory and sampled randomly.  Without this,
+            # Wikipedia streams alphabetically by article title.
+            hf_ds = hf_ds.shuffle(seed=42, buffer_size=10000)
             text_column = src["text_column"]
             logger.info(f"  → loaded successfully")
             break
