@@ -42,6 +42,11 @@ p3_truncate_sessions: 4
 device: "auto"  # auto-detect: cuda > mps > cpu
 base_dtype: "bfloat16"
 
+# Performance (A100)
+gradient_checkpointing: true
+compile_model: false
+tf32_matmul: true
+
 # Logging
 wandb_project: "nat"
 wandb_entity: null
