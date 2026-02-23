@@ -454,31 +454,47 @@ def train_phase1(
 # ------------------------------------------------------------------ #
 
 def _save_checkpoint(model, path: str, episode_idx: int) -> None:
-    """Save trainable parameters to disk."""
+    """Save trainable parameters to disk (strips torch.compile prefix)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "episode": episode_idx,
-            "adaptive_A": model.adaptive_A.state_dict(),
-            "adaptive_B": model.adaptive_B.state_dict(),
-            "consolidation": model.consolidation.state_dict(),
+            "adaptive_A": _strip_compile_prefix(model.adaptive_A.state_dict()),
+            "adaptive_B": _strip_compile_prefix(model.adaptive_B.state_dict()),
+            "consolidation": _strip_compile_prefix(model.consolidation.state_dict()),
         },
         path,
     )
     logger.info(f"Checkpoint saved → {path}  (episode {episode_idx})")
 
 
+def _strip_compile_prefix(state_dict: dict) -> dict:
+    """Strip ``_orig_mod.`` prefix added by ``torch.compile()``."""
+    cleaned = {}
+    for k, v in state_dict.items():
+        new_key = k.replace("_orig_mod.", "")
+        cleaned[new_key] = v
+    return cleaned
+
+
 def load_checkpoint(model, path: str) -> int:
     """
     Load trainable parameters from a Phase 1 checkpoint.
 
+    Handles checkpoints saved with or without ``torch.compile()``.
     Returns the episode index stored in the checkpoint.
     """
     state = torch.load(path, weights_only=True, map_location="cpu")
-    model.adaptive_A.load_state_dict(state["adaptive_A"])
-    model.adaptive_B.load_state_dict(state["adaptive_B"])
-    model.consolidation.load_state_dict(state["consolidation"])
+    model.adaptive_A.load_state_dict(
+        _strip_compile_prefix(state["adaptive_A"])
+    )
+    model.adaptive_B.load_state_dict(
+        _strip_compile_prefix(state["adaptive_B"])
+    )
+    model.consolidation.load_state_dict(
+        _strip_compile_prefix(state["consolidation"])
+    )
     episode = state.get("episode", 0)
     logger.info(f"Checkpoint loaded ← {path}  (episode {episode})")
     return episode
