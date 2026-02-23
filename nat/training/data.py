@@ -471,13 +471,12 @@ class RealEpisodicDataset(Dataset):
       - ``ehovy/race``            — RC grouped by passage (~88 K)
       - ``stanfordnlp/coqa``      — conversational RC, ~15 Qs/story (~127 K)
       - ``ucinlp/drop``           — discrete reasoning by section (~77 K)
-      - ``allenai/quoref``        — coreference QA by article (~19 K)
-      - ``allenai/cosmos_qa``     — commonsense RC by blog post (~25 K)
+      - ``Samsoup/cosmos_qa``     — commonsense RC by blog post (~25 K)
       - ``allenai/ropes``         — causal reasoning by background (~11 K)
       - ``aps/super_glue`` multirc— multi-sentence RC by paragraph (~27 K)
       - ``Rowan/hellaswag``       — commonsense by activity (~40 K)
       - ``trivia_qa`` (rc)        — trivia by entity (~138 K)
-      - ``next-tat/TAT-QA``       — numerical reasoning over tables (~13 K)
+      - ``dreamerdeo/finqa``      — numerical reasoning over tables (~6 K)
       - ``emozilla/quality``      — long-doc knowledge QA (~6.5 K)
       - ``allenai/wiqa``          — procedural/physical reasoning (~30 K)
       - ``armanc/ScienceQA``       — science QA by paper abstract (~75 K)
@@ -547,27 +546,11 @@ class RealEpisodicDataset(Dataset):
             ),
             "grouper": lambda ex: ex.get("section_id", ""),
         },
-        # ── Coreference QA (grouped by article) ──
-        {
-            "name": "allenai/quoref",
-            "config": None,
-            "split": "train",
-            "trust_remote_code": True,
-            "formatter": lambda ex: (
-                f"Based on: \"{ex['context'][:400]}\"\n{ex['question']}",
-                ex["answers"]["text"][0]
-                if ex.get("answers")
-                and ex["answers"].get("text")
-                else "",
-            ),
-            "grouper": lambda ex: ex.get("title", ""),
-        },
         # ── Commonsense RC (grouped by blog post) ──
         {
-            "name": "allenai/cosmos_qa",
+            "name": "Samsoup/cosmos_qa",
             "config": None,
             "split": "train",
-            "trust_remote_code": True,
             "formatter": lambda ex: (
                 f"Based on: \"{ex['context'][:400]}\"\n{ex['question']}",
                 ex[f"answer{ex['label']}"]
@@ -642,26 +625,24 @@ class RealEpisodicDataset(Dataset):
                 else ""
             ),
         },
-        # ── Numerical reasoning over tables (grouped by table context) ──
+        # ── Numerical reasoning over tables (grouped by table/text) ──
         {
-            "name": "next-tat/TAT-QA",
+            "name": "dreamerdeo/finqa",
             "config": None,
             "split": "train",
-            "exploder": lambda ex: [
+            "formatter": lambda ex: (
                 (
-                    (
-                        f"Table: {ex['table']['table'][:400]}\n"
-                        f"Context: {' '.join(p['text'] for p in ex.get('paragraphs', []))[:300]}\n"
-                        f"{q['question']}"
-                    ),
-                    str(q.get("answer", "")) if q.get("answer") else "",
-                )
-                for q in ex.get("questions", [])
-                if q.get("question")
-            ],
-            "grouper": lambda ex: ex["table"]["uid"]
-            if ex.get("table") and ex["table"].get("uid")
-            else "",
+                    f"Context: {' '.join(ex.get('pre_text', []))[:300]}\n"
+                    f"Table: {str(ex.get('table', []))[:300]}\n"
+                    f"{ex['question']}"
+                ),
+                str(ex.get("answer", "")),
+            ),
+            # Group by pre_text (financial report paragraph that
+            # precedes the table — shared across multiple Qs)
+            "grouper": lambda ex: (
+                ' '.join(ex.get('pre_text', []))[:200]
+            ),
         },
         # ── Long-document knowledge QA (grouped by article) ──
         {
@@ -772,6 +753,9 @@ class RealEpisodicDataset(Dataset):
         """
         from datasets import load_dataset, load_from_disk
 
+        loaded: list[str] = []
+        failed: list[str] = []
+
         for src in self.SOURCES:
             try:
                 logger.info(f"Loading {src['name']}...")
@@ -860,14 +844,29 @@ class RealEpisodicDataset(Dataset):
                         f"  → {src['name']}: {total_pairs} pairs "
                         f"({len(groups)} context groups)"
                     )
+                    loaded.append(src["name"])
                 else:
                     logger.warning(
                         f"  → {src['name']}: loaded but 0 valid groups"
                     )
+                    failed.append(src["name"])
             except Exception as e:
                 logger.warning(
                     f"  → {src['name']}: failed ({e}), skipping"
                 )
+                failed.append(src["name"])
+
+        # ── Summary ──
+        n_total = len(self.SOURCES)
+        n_ok = len(loaded)
+        n_fail = len(failed)
+        logger.info("")
+        logger.info(f"Phase 2 dataset summary: {n_ok}/{n_total} loaded, {n_fail} failed")
+        if loaded:
+            logger.info(f"  ✓ Loaded: {', '.join(loaded)}")
+        if failed:
+            logger.warning(f"  ✗ Failed: {', '.join(failed)}")
+        logger.info("")
 
     def __len__(self) -> int:
         return self.num_episodes
