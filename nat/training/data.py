@@ -466,64 +466,54 @@ class RealEpisodicDataset(Dataset):
     problems 6-8 about "anatomy".
 
     Grouped sources:
-      - ``rajpurkar/squad``     — reading comprehension, grouped by article (~87 K)
-      - ``cais/mmlu``           — multi-domain knowledge, grouped by subject (~14 K)
-      - ``Rowan/hellaswag``     — commonsense completion, grouped by activity (~40 K)
+      - ``rajpurkar/squad``          — reading comprehension by article (~87 K)
+      - ``cais/mmlu``                — multi-domain knowledge by subject (~14 K)
+      - ``Rowan/hellaswag``          — commonsense completion by activity (~40 K)
+      - ``EleutherAI/hendrycks_math``— competition math by type (~7.5 K)
+      - ``derek-thomas/ScienceQA``   — science by topic, text-only (~6 K)
+      - ``ehovy/race``               — reading comprehension by passage (~88 K)
+      - ``trivia_qa`` (rc)           — trivia by entity (~138 K)
 
     Ungrouped sources (same-source sampling):
-      - ``openai/gsm8k``        — grade-school math (~7.5 K)
-      - ``allenai/ai2_arc``     — science reasoning, Easy + Challenge (~3.4 K)
       - ``tau/commonsense_qa``  — commonsense reasoning (~10 K)
       - ``ybisk/piqa``          — physical intuition (~16 K)
-      - ``google/boolq``        — yes / no reading comprehension (~9.4 K)
-      - ``allenai/sciq``        — science with explanations (~12 K)
       - ``allenai/openbookqa``  — open-book science QA (~5 K)
-      - ``trivia_qa``           — trivia / factual recall (~138 K)
       - ``allenai/winogrande``  — coreference / commonsense (~40 K)
 
     Falls back gracefully if a dataset is unavailable.
     """
 
     SOURCES = [
-        # ── Math ──
+        # ── Math (grouped by type: algebra, geometry, etc.) ──
         {
-            "name": "openai/gsm8k",
-            "config": "main",
+            "name": "EleutherAI/hendrycks_math",
+            "config": "all",
             "split": "train",
             "formatter": lambda ex: (
-                ex["question"],
-                ex["answer"].split("####")[-1].strip()
-                if "####" in ex["answer"]
-                else ex["answer"],
+                ex["problem"],
+                ex["solution"].split("\\boxed{")[-1].rstrip("}")
+                if "\\boxed{" in ex["solution"]
+                else ex["solution"][-200:],
             ),
+            "grouper": lambda ex: ex.get("type", ""),
         },
-        # ── Science (easy) ──
+        # ── Science (grouped by topic, text-only) ──
         {
-            "name": "allenai/ai2_arc",
-            "config": "ARC-Easy",
+            "name": "derek-thomas/ScienceQA",
+            "config": None,
             "split": "train",
             "formatter": lambda ex: (
-                ex["question"],
-                ex["choices"]["text"][
-                    ex["choices"]["label"].index(ex["answerKey"])
-                ]
-                if ex["answerKey"] in ex["choices"]["label"]
-                else ex["choices"]["text"][0],
-            ),
-        },
-        # ── Science (hard) ──
-        {
-            "name": "allenai/ai2_arc",
-            "config": "ARC-Challenge",
-            "split": "train",
-            "formatter": lambda ex: (
-                ex["question"],
-                ex["choices"]["text"][
-                    ex["choices"]["label"].index(ex["answerKey"])
-                ]
-                if ex["answerKey"] in ex["choices"]["label"]
-                else ex["choices"]["text"][0],
-            ),
+                (
+                    f"{ex['hint']}\n{ex['question']}"
+                    if ex.get("hint")
+                    else ex["question"]
+                ),
+                ex["choices"][ex["answer"]]
+                if isinstance(ex["answer"], int)
+                and 0 <= ex["answer"] < len(ex["choices"])
+                else ex["choices"][0],
+            ) if ex.get("image") is None else (None, None),
+            "grouper": lambda ex: ex.get("topic", ""),
         },
         # ── Multi-domain knowledge (grouped by subject) ──
         {
@@ -563,15 +553,21 @@ class RealEpisodicDataset(Dataset):
                 ex["sol1"] if ex["label"] == 0 else ex["sol2"],
             ),
         },
-        # ── Reading comprehension (yes/no) ──
+        # ── Reading comprehension (grouped by passage) ──
         {
-            "name": "google/boolq",
-            "config": None,
+            "name": "ehovy/race",
+            "config": "all",
             "split": "train",
             "formatter": lambda ex: (
-                ex["question"],
-                "Yes" if ex["answer"] else "No",
+                f"Based on: \"{ex['article'][:400]}\"\n{ex['question']}",
+                ex["options"][
+                    ["A", "B", "C", "D"].index(ex["answer"])
+                ]
+                if ex["answer"] in "ABCD"
+                and ["A", "B", "C", "D"].index(ex["answer"]) < len(ex["options"])
+                else ex["options"][0],
             ),
+            "grouper": lambda ex: ex.get("article", "")[:200],
         },
         # ── Commonsense completion (grouped by activity) ──
         {
@@ -585,16 +581,6 @@ class RealEpisodicDataset(Dataset):
                 else ex["endings"][0],
             ),
             "grouper": lambda ex: ex.get("activity_label", ""),
-        },
-        # ── Science with explanations ──
-        {
-            "name": "allenai/sciq",
-            "config": None,
-            "split": "train",
-            "formatter": lambda ex: (
-                ex["question"],
-                ex["correct_answer"],
-            ),
         },
         # ── Open-book science QA ──
         {
@@ -623,10 +609,10 @@ class RealEpisodicDataset(Dataset):
             ),
             "grouper": lambda ex: ex.get("title", ""),
         },
-        # ── Trivia / factual recall ──
+        # ── Trivia / factual recall (grouped by entity) ──
         {
             "name": "trivia_qa",
-            "config": "rc.nocontext",
+            "config": "rc",
             "split": "train",
             "formatter": lambda ex: (
                 ex["question"],
@@ -637,6 +623,12 @@ class RealEpisodicDataset(Dataset):
                     if ex["answer"].get("aliases")
                     else ""
                 ),
+            ),
+            "grouper": lambda ex: (
+                ex["entity_pages"]["title"][0]
+                if ex.get("entity_pages")
+                and ex["entity_pages"].get("title")
+                else ""
             ),
         },
         # ── Coreference / commonsense ──
