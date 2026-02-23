@@ -459,99 +459,40 @@ class RealEpisodicDataset(Dataset):
     per episode into a single tokenised sequence, and records
     ``problem_spans`` for per-problem loss computation.
 
-    **Context grouping** — sources that support it group QA pairs by
-    topic / article / activity so that all problems within an episode
-    share related context.  This gives a much cleaner adaptation signal:
-    adapting on problems 1-5 about "anatomy" actually helps with eval
-    problems 6-8 about "anatomy".
+    **Context grouping** — all sources group QA pairs by shared
+    passage, article, or tight context so that all problems within an
+    episode share related content.  This gives a clean adaptation
+    signal: adapting on passage-based problems 1-5 genuinely helps
+    with eval problems 6-8 about the same passage.
 
-    Grouped sources:
-      - ``rajpurkar/squad``          — reading comprehension by article (~87 K)
-      - ``cais/mmlu``                — multi-domain knowledge by subject (~14 K)
-      - ``Rowan/hellaswag``          — commonsense completion by activity (~40 K)
-      - ``EleutherAI/hendrycks_math``— competition math by type (~7.5 K)
-      - ``derek-thomas/ScienceQA``   — science by topic, text-only (~6 K)
-      - ``ehovy/race``               — reading comprehension by passage (~88 K)
-      - ``trivia_qa`` (rc)           — trivia by entity (~138 K)
-
-    Ungrouped sources (same-source sampling):
-      - ``tau/commonsense_qa``  — commonsense reasoning (~10 K)
-      - ``ybisk/piqa``          — physical intuition (~16 K)
-      - ``allenai/openbookqa``  — open-book science QA (~5 K)
-      - ``allenai/winogrande``  — coreference / commonsense (~40 K)
+    Sources (all tightly grouped):
+      - ``rajpurkar/squad``       — RC grouped by article (~87 K)
+      - ``ehovy/race``            — RC grouped by passage (~88 K)
+      - ``stanfordnlp/coqa``      — conversational RC, ~15 Qs/story (~127 K)
+      - ``ucinlp/drop``           — discrete reasoning by section (~77 K)
+      - ``allenai/quoref``        — coreference QA by article (~19 K)
+      - ``allenai/cosmos_qa``     — commonsense RC by blog post (~25 K)
+      - ``allenai/ropes``         — causal reasoning by background (~11 K)
+      - ``aps/super_glue`` multirc— multi-sentence RC by paragraph (~27 K)
+      - ``Rowan/hellaswag``       — commonsense by activity (~40 K)
+      - ``trivia_qa`` (rc)        — trivia by entity (~138 K)
 
     Falls back gracefully if a dataset is unavailable.
     """
 
     SOURCES = [
-        # ── Math (grouped by type: algebra, geometry, etc.) ──
+        # ── Reading comprehension (grouped by article) ──
         {
-            "name": "EleutherAI/hendrycks_math",
-            "config": "all",
-            "split": "train",
-            "formatter": lambda ex: (
-                ex["problem"],
-                ex["solution"].split("\\boxed{")[-1].rstrip("}")
-                if "\\boxed{" in ex["solution"]
-                else ex["solution"][-200:],
-            ),
-            "grouper": lambda ex: ex.get("type", ""),
-        },
-        # ── Science (grouped by topic, text-only) ──
-        {
-            "name": "derek-thomas/ScienceQA",
+            "name": "rajpurkar/squad",
             "config": None,
             "split": "train",
             "formatter": lambda ex: (
-                (
-                    f"{ex['hint']}\n{ex['question']}"
-                    if ex.get("hint")
-                    else ex["question"]
-                ),
-                ex["choices"][ex["answer"]]
-                if isinstance(ex["answer"], int)
-                and 0 <= ex["answer"] < len(ex["choices"])
-                else ex["choices"][0],
-            ) if ex.get("image") is None else (None, None),
-            "grouper": lambda ex: ex.get("topic", ""),
-        },
-        # ── Multi-domain knowledge (grouped by subject) ──
-        {
-            "name": "cais/mmlu",
-            "config": "all",
-            "split": "test",
-            "formatter": lambda ex: (
-                ex["question"],
-                ex["choices"][ex["answer"]]
-                if isinstance(ex["answer"], int)
-                and 0 <= ex["answer"] < len(ex["choices"])
-                else ex["choices"][0],
+                f"Based on: \"{ex['context'][:400]}\"\n{ex['question']}",
+                ex["answers"]["text"][0]
+                if ex["answers"].get("text")
+                else "",
             ),
-            "grouper": lambda ex: ex.get("subject", ""),
-        },
-        # ── Commonsense reasoning ──
-        {
-            "name": "tau/commonsense_qa",
-            "config": None,
-            "split": "train",
-            "formatter": lambda ex: (
-                ex["question"],
-                ex["choices"]["text"][
-                    ex["choices"]["label"].index(ex["answerKey"])
-                ]
-                if ex["answerKey"] in ex["choices"]["label"]
-                else ex["choices"]["text"][0],
-            ),
-        },
-        # ── Physical intuition ──
-        {
-            "name": "ybisk/piqa",
-            "config": None,
-            "split": "train",
-            "formatter": lambda ex: (
-                ex["goal"],
-                ex["sol1"] if ex["label"] == 0 else ex["sol2"],
-            ),
+            "grouper": lambda ex: ex.get("title", ""),
         },
         # ── Reading comprehension (grouped by passage) ──
         {
@@ -569,6 +510,95 @@ class RealEpisodicDataset(Dataset):
             ),
             "grouper": lambda ex: ex.get("article", "")[:200],
         },
+        # ── Conversational RC (~15 Qs per story, exploded) ──
+        {
+            "name": "stanfordnlp/coqa",
+            "config": None,
+            "split": "train",
+            "exploder": lambda ex: [
+                (
+                    f"Based on: \"{ex['story'][:400]}\"\n{ex['questions'][i]}",
+                    ex["answers"]["input_text"][i],
+                )
+                for i in range(len(ex["questions"]))
+                if ex["answers"]["input_text"][i]
+            ],
+            "grouper": lambda ex: ex.get("story", "")[:200],
+        },
+        # ── Discrete reasoning (grouped by section) ──
+        {
+            "name": "ucinlp/drop",
+            "config": None,
+            "split": "train",
+            "formatter": lambda ex: (
+                f"Based on: \"{ex['passage'][:400]}\"\n{ex['question']}",
+                ex["answers_spans"]["spans"][0]
+                if ex.get("answers_spans")
+                and ex["answers_spans"].get("spans")
+                else "",
+            ),
+            "grouper": lambda ex: ex.get("section_id", ""),
+        },
+        # ── Coreference QA (grouped by article) ──
+        {
+            "name": "allenai/quoref",
+            "config": None,
+            "split": "train",
+            "trust_remote_code": True,
+            "formatter": lambda ex: (
+                f"Based on: \"{ex['context'][:400]}\"\n{ex['question']}",
+                ex["answers"]["text"][0]
+                if ex.get("answers")
+                and ex["answers"].get("text")
+                else "",
+            ),
+            "grouper": lambda ex: ex.get("title", ""),
+        },
+        # ── Commonsense RC (grouped by blog post) ──
+        {
+            "name": "allenai/cosmos_qa",
+            "config": None,
+            "split": "train",
+            "trust_remote_code": True,
+            "formatter": lambda ex: (
+                f"Based on: \"{ex['context'][:400]}\"\n{ex['question']}",
+                ex[f"answer{ex['label']}"]
+                if isinstance(ex.get("label"), int)
+                and 0 <= ex["label"] <= 3
+                else ex.get("answer0", ""),
+            ),
+            "grouper": lambda ex: ex.get("context", "")[:200],
+        },
+        # ── Causal / scientific reasoning (grouped by background) ──
+        {
+            "name": "allenai/ropes",
+            "config": None,
+            "split": "train",
+            "formatter": lambda ex: (
+                (
+                    f"Background: {ex['background'][:300]}\n"
+                    f"Situation: {ex['situation'][:200]}\n"
+                    f"{ex['question']}"
+                ),
+                ex["answers"]["text"][0]
+                if ex.get("answers")
+                and ex["answers"].get("text")
+                else "",
+            ),
+            "grouper": lambda ex: ex.get("background", "")[:200],
+        },
+        # ── Multi-sentence RC (grouped by paragraph, correct only) ──
+        {
+            "name": "aps/super_glue",
+            "config": "multirc",
+            "split": "train",
+            "filter": lambda ex: ex.get("label", 0) == 1,
+            "formatter": lambda ex: (
+                f"Based on: \"{ex['paragraph'][:400]}\"\n{ex['question']}",
+                ex["answer"],
+            ),
+            "grouper": lambda ex: ex["idx"]["paragraph"],
+        },
         # ── Commonsense completion (grouped by activity) ──
         {
             "name": "Rowan/hellaswag",
@@ -581,33 +611,6 @@ class RealEpisodicDataset(Dataset):
                 else ex["endings"][0],
             ),
             "grouper": lambda ex: ex.get("activity_label", ""),
-        },
-        # ── Open-book science QA ──
-        {
-            "name": "allenai/openbookqa",
-            "config": "main",
-            "split": "train",
-            "formatter": lambda ex: (
-                ex["question_stem"],
-                ex["choices"]["text"][
-                    ex["choices"]["label"].index(ex["answerKey"])
-                ]
-                if ex["answerKey"] in ex["choices"]["label"]
-                else ex["choices"]["text"][0],
-            ),
-        },
-        # ── Reading comprehension (grouped by article) ──
-        {
-            "name": "rajpurkar/squad",
-            "config": None,
-            "split": "train",
-            "formatter": lambda ex: (
-                f"Based on: \"{ex['context'][:400]}\"\n{ex['question']}",
-                ex["answers"]["text"][0]
-                if ex["answers"].get("text")
-                else "",
-            ),
-            "grouper": lambda ex: ex.get("title", ""),
         },
         # ── Trivia / factual recall (grouped by entity) ──
         {
@@ -629,16 +632,6 @@ class RealEpisodicDataset(Dataset):
                 if ex.get("entity_pages")
                 and ex["entity_pages"].get("title")
                 else ""
-            ),
-        },
-        # ── Coreference / commonsense ──
-        {
-            "name": "allenai/winogrande",
-            "config": "winogrande_xl",
-            "split": "train",
-            "formatter": lambda ex: (
-                ex["sentence"],
-                ex["option1"] if ex["answer"] == "1" else ex["option2"],
             ),
         },
     ]
@@ -686,85 +679,92 @@ class RealEpisodicDataset(Dataset):
         """Load QA pairs into per-source context groups.
 
         For sources with a ``grouper`` function, QA pairs are split
-        into context groups (e.g. by article title, subject, or
-        activity).  Groups smaller than ``MIN_GROUP_SIZE`` are merged
+        into context groups (e.g. by article title, section, or
+        passage).  Groups smaller than ``MIN_GROUP_SIZE`` are merged
         into a fallback group for that source.
 
-        For sources without a ``grouper``, all QA pairs form a single
-        group (equivalent to same-source sampling).
+        Special source keys:
+        - ``exploder``: function that takes a row and returns a list of
+          ``(question, answer)`` pairs (for multi-Q-per-row datasets
+          like CoQA).
+        - ``filter``: predicate applied to each row before formatting
+          (e.g. MultiRC label==1).
+        - ``trust_remote_code``: passed to ``load_dataset``.
         """
         from datasets import load_dataset
 
         for src in self.SOURCES:
             try:
-                logger.info(f"Loading {src['name']} ({src['config']})...")
+                logger.info(f"Loading {src['name']} ({src.get('config')})...")
+                load_kwargs: dict[str, Any] = {}
+                if src.get("trust_remote_code"):
+                    load_kwargs["trust_remote_code"] = True
                 ds = load_dataset(
                     src["name"],
-                    src["config"],
+                    src.get("config"),
                     split=src["split"],
+                    **load_kwargs,
                 )
 
                 grouper = src.get("grouper")
+                exploder = src.get("exploder")
+                row_filter = src.get("filter")
+                formatter = src.get("formatter")
 
-                if grouper is None:
-                    # No grouping — one big group for this source
-                    bucket: list[tuple[str, str]] = []
-                    for example in ds:
-                        try:
-                            q, a = src["formatter"](example)
-                            if q and a:
-                                bucket.append((q.strip(), a.strip()))
-                        except (KeyError, IndexError, TypeError):
+                groups_dict: dict[str, list[tuple[str, str]]] = {}
+
+                for example in ds:
+                    try:
+                        # Optional row-level filter (e.g. MultiRC label==1)
+                        if row_filter and not row_filter(example):
                             continue
-                    if bucket:
-                        self.source_groups.append([bucket])
-                        logger.info(
-                            f"  → {src['name']}: {len(bucket)} pairs "
-                            f"(1 group)"
-                        )
-                    else:
-                        logger.warning(
-                            f"  → {src['name']}: loaded but 0 valid pairs"
-                        )
-                else:
-                    # Group by key
-                    groups_dict: dict[str, list[tuple[str, str]]] = {}
-                    for example in ds:
-                        try:
-                            q, a = src["formatter"](example)
-                            key = grouper(example)
-                            if q and a and key:
+
+                        # Get group key (convert non-string keys)
+                        key = str(grouper(example)) if grouper else "_all"
+                        if not key:
+                            continue
+
+                        # Extract QA pairs — either explode or format
+                        if exploder:
+                            pairs = exploder(example)
+                            for q, a in pairs:
+                                if q and a:
+                                    groups_dict.setdefault(key, []).append(
+                                        (q.strip(), a.strip())
+                                    )
+                        elif formatter:
+                            q, a = formatter(example)
+                            if q and a:
                                 groups_dict.setdefault(key, []).append(
                                     (q.strip(), a.strip())
                                 )
-                        except (KeyError, IndexError, TypeError):
-                            continue
+                    except (KeyError, IndexError, TypeError, ValueError):
+                        continue
 
-                    # Separate large groups from small ones
-                    groups: list[list[tuple[str, str]]] = []
-                    fallback: list[tuple[str, str]] = []
-                    for _key, pairs in groups_dict.items():
-                        if len(pairs) >= self.MIN_GROUP_SIZE:
-                            groups.append(pairs)
-                        else:
-                            fallback.extend(pairs)
-
-                    # Merge small groups into a fallback group
-                    if len(fallback) >= self.MIN_GROUP_SIZE:
-                        groups.append(fallback)
-
-                    if groups:
-                        self.source_groups.append(groups)
-                        total_pairs = sum(len(g) for g in groups)
-                        logger.info(
-                            f"  → {src['name']}: {total_pairs} pairs "
-                            f"({len(groups)} context groups)"
-                        )
+                # Separate large groups from small ones
+                groups: list[list[tuple[str, str]]] = []
+                fallback: list[tuple[str, str]] = []
+                for _key, pairs in groups_dict.items():
+                    if len(pairs) >= self.MIN_GROUP_SIZE:
+                        groups.append(pairs)
                     else:
-                        logger.warning(
-                            f"  → {src['name']}: loaded but 0 valid "
-                            f"groups"
-                        )
+                        fallback.extend(pairs)
+
+                # Merge small groups into a fallback group
+                if len(fallback) >= self.MIN_GROUP_SIZE:
+                    groups.append(fallback)
+
+                if groups:
+                    self.source_groups.append(groups)
+                    total_pairs = sum(len(g) for g in groups)
+                    logger.info(
+                        f"  → {src['name']}: {total_pairs} pairs "
+                        f"({len(groups)} context groups)"
+                    )
+                else:
+                    logger.warning(
+                        f"  → {src['name']}: loaded but 0 valid groups"
+                    )
             except Exception as e:
                 logger.warning(
                     f"  → {src['name']}: failed ({e}), skipping"
