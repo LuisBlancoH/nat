@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import random
 from typing import Any, Iterator
 
@@ -480,8 +481,11 @@ class RealEpisodicDataset(Dataset):
       - ``emozilla/quality``      — long-doc knowledge QA (~6.5 K)
       - ``allenai/wiqa``          — procedural/physical reasoning (~30 K)
       - ``armanc/ScienceQA``       — science QA by paper abstract (~75 K)
+      - ``CodeQA`` (local)          — code comprehension by snippet (~190 K)
 
     Falls back gracefully if a dataset is unavailable.
+    CodeQA requires a one-time preparation step — see
+    ``scripts/prepare_codeqa.py``.
     """
 
     SOURCES = [
@@ -698,6 +702,17 @@ class RealEpisodicDataset(Dataset):
             ),
             "grouper": lambda ex: ex.get("Context", "")[:200],
         },
+        # ── Code comprehension (grouped by code snippet) ──
+        # Requires one-time prep: python scripts/prepare_codeqa.py
+        {
+            "name": "CodeQA (Liu & Wan, EMNLP 2021)",
+            "local_path": "data/codeqa",
+            "formatter": lambda ex: (
+                f"Code:\n{ex['code'][:400]}\n{ex['question']}",
+                ex.get("answer", ""),
+            ),
+            "grouper": lambda ex: ex.get("code", "")[:200],
+        },
     ]
 
     # Minimum group size — groups smaller than this are merged into
@@ -755,20 +770,40 @@ class RealEpisodicDataset(Dataset):
           (e.g. MultiRC label==1).
         - ``trust_remote_code``: passed to ``load_dataset``.
         """
-        from datasets import load_dataset
+        from datasets import load_dataset, load_from_disk
 
         for src in self.SOURCES:
             try:
-                logger.info(f"Loading {src['name']} ({src.get('config')})...")
-                load_kwargs: dict[str, Any] = {}
-                if src.get("trust_remote_code"):
-                    load_kwargs["trust_remote_code"] = True
-                ds = load_dataset(
-                    src["name"],
-                    src.get("config"),
-                    split=src["split"],
-                    **load_kwargs,
-                )
+                logger.info(f"Loading {src['name']}...")
+
+                if src.get("local_path"):
+                    # Local dataset (e.g. CodeQA from Google Drive)
+                    local_path = src["local_path"]
+                    if not os.path.isabs(local_path):
+                        # Resolve relative to project root
+                        project_root = os.path.dirname(
+                            os.path.dirname(os.path.dirname(__file__))
+                        )
+                        local_path = os.path.join(project_root, local_path)
+                    if not os.path.exists(local_path):
+                        logger.warning(
+                            f"  → {src['name']}: not found at {local_path}"
+                        )
+                        logger.warning(
+                            "    Run: python scripts/prepare_codeqa.py --help"
+                        )
+                        continue
+                    ds = load_from_disk(local_path)
+                else:
+                    load_kwargs: dict[str, Any] = {}
+                    if src.get("trust_remote_code"):
+                        load_kwargs["trust_remote_code"] = True
+                    ds = load_dataset(
+                        src["name"],
+                        src.get("config"),
+                        split=src["split"],
+                        **load_kwargs,
+                    )
 
                 grouper = src.get("grouper")
                 exploder = src.get("exploder")
