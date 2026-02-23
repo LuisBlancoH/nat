@@ -476,9 +476,9 @@ class RealEpisodicDataset(Dataset):
       - ``aps/super_glue`` multirc— multi-sentence RC by paragraph (~27 K)
       - ``Rowan/hellaswag``       — commonsense by activity (~40 K)
       - ``trivia_qa`` (rc)        — trivia by entity (~138 K)
-      - ``dreamerdeo/finqa``      — numerical reasoning over tables (~6 K)
-      - ``emozilla/quality``      — long-doc knowledge QA (~6.5 K)
-      - ``allenai/wiqa``          — procedural/physical reasoning (~30 K)
+      - ``ChanceFocus/flare-finqa``— numerical reasoning over tables (~6 K)
+      - ``emozilla/quality``      — long-doc knowledge QA (~2.5 K)
+      - ``jluckyboyj/T0_Mixture_wiqa``— procedural/physical reasoning (~30 K)
       - ``armanc/ScienceQA``       — science QA by paper abstract (~75 K)
       - ``CodeQA`` (local)          — code comprehension by snippet (~190 K)
 
@@ -625,24 +625,19 @@ class RealEpisodicDataset(Dataset):
                 else ""
             ),
         },
-        # ── Numerical reasoning over tables (grouped by table/text) ──
+        # ── Numerical reasoning over tables (grouped by context) ──
         {
-            "name": "dreamerdeo/finqa",
+            "name": "ChanceFocus/flare-finqa",
             "config": None,
             "split": "train",
             "formatter": lambda ex: (
-                (
-                    f"Context: {' '.join(ex.get('pre_text', []))[:300]}\n"
-                    f"Table: {str(ex.get('table', []))[:300]}\n"
-                    f"{ex['question']}"
-                ),
+                # query already contains context+table+question
+                ex.get("query", ""),
                 str(ex.get("answer", "")),
             ),
-            # Group by pre_text (financial report paragraph that
-            # precedes the table — shared across multiple Qs)
-            "grouper": lambda ex: (
-                ' '.join(ex.get('pre_text', []))[:200]
-            ),
+            # Group by first 200 chars of query (shared financial
+            # report context across Qs about the same table)
+            "grouper": lambda ex: ex.get("query", "")[:200],
         },
         # ── Long-document knowledge QA (grouped by article) ──
         {
@@ -651,26 +646,37 @@ class RealEpisodicDataset(Dataset):
             "split": "train",
             "formatter": lambda ex: (
                 f"Based on: \"{ex['article'][:400]}\"\n{ex['question']}",
-                ex["options"][ex["gold_label"] - 1]
-                if isinstance(ex.get("gold_label"), int)
-                and 1 <= ex["gold_label"] <= len(ex.get("options", []))
+                ex["options"][ex["answer"]]
+                if isinstance(ex.get("answer"), int)
+                and 0 <= ex["answer"] < len(ex.get("options", []))
                 else ex.get("options", [""])[0],
             ),
-            "grouper": lambda ex: ex.get("article_id", ""),
+            "grouper": lambda ex: ex.get("article", "")[:200],
         },
         # ── Procedural / physical reasoning (grouped by process) ──
         {
-            "name": "allenai/wiqa",
+            "name": "jluckyboyj/T0_Mixture_wiqa",
             "config": None,
             "split": "train",
             "formatter": lambda ex: (
-                (
-                    f"Process: {' '.join(ex['question_para_step'][:5])}\n"
-                    f"{ex['question_stem']}"
-                ),
-                ex.get("answer_label", ""),
+                # User message has "Process:\n...\nPerturbation hypothesis:\n..."
+                ex["messages"][0]["content"]
+                if ex.get("messages") and len(ex["messages"]) >= 2
+                else "",
+                # Assistant message has "yes" or "no"
+                ex["messages"][1]["content"]
+                if ex.get("messages") and len(ex["messages"]) >= 2
+                else "",
             ),
-            "grouper": lambda ex: ex.get("metadata_para_id", ""),
+            # Group by the process steps (text before
+            # "Perturbation hypothesis")
+            "grouper": lambda ex: (
+                ex["messages"][0]["content"].split(
+                    "Perturbation hypothesis"
+                )[0][:200]
+                if ex.get("messages") and ex["messages"][0].get("content")
+                else ""
+            ),
         },
         # ── Science QA (grouped by paper abstract) ──
         {
