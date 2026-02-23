@@ -479,6 +479,7 @@ class RealEpisodicDataset(Dataset):
       - ``next-tat/TAT-QA``       — numerical reasoning over tables (~13 K)
       - ``emozilla/quality``      — long-doc knowledge QA (~6.5 K)
       - ``allenai/wiqa``          — procedural/physical reasoning (~30 K)
+      - ``armanc/ScienceQA``       — science QA by paper abstract (~75 K)
 
     Falls back gracefully if a dataset is unavailable.
     """
@@ -685,6 +686,17 @@ class RealEpisodicDataset(Dataset):
                 ex.get("answer_label", ""),
             ),
             "grouper": lambda ex: ex.get("metadata_para_id", ""),
+        },
+        # ── Science QA (grouped by paper abstract) ──
+        {
+            "name": "armanc/ScienceQA",
+            "config": None,
+            "split": "train",
+            "formatter": lambda ex: (
+                f"Based on: \"{ex['Context'][:400]}\"\n{ex['Question']}",
+                ex.get("Answer", ""),
+            ),
+            "grouper": lambda ex: ex.get("Context", "")[:200],
         },
     ]
 
