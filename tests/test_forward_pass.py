@@ -338,8 +338,8 @@ class TestGradientFlow:
         for name, param in nat_model.base_model.named_parameters():
             assert param.grad is None, f"Base param {name} got gradient!"
 
-    def test_grad_to_fast_A_init(self, nat_model, dummy_ids):
-        """Critical: BPTT gradient must reach fast_A_init through the model."""
+    def test_grad_to_slow_params(self, nat_model, dummy_ids):
+        """BPTT gradient must reach the slow (learned) parameters."""
         nat_model.train()
         nat_model.start_session(BATCH)
 
@@ -347,10 +347,12 @@ class TestGradientFlow:
         out = nat_model(dummy_ids, labels=labels)
         out["loss"].backward()
 
-        assert nat_model.adaptive_A.fast_A_init.grad is not None, (
-            "No grad on fast_A_init — BPTT chain broken in full model"
+        # fast_A_init is now a frozen zero buffer — check a real slow param instead
+        write_key_w = nat_model.adaptive_A.write_key_net[0].weight
+        assert write_key_w.grad is not None, (
+            "No grad on write_key_net — BPTT chain broken in full model"
         )
-        assert nat_model.adaptive_A.fast_A_init.grad.abs().sum() > 0
+        assert write_key_w.grad.abs().sum() > 0
 
 
 # ============================================================

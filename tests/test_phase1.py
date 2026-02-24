@@ -277,8 +277,9 @@ class TestSingleEpisodicStep:
         out = model(ids2, labels=ids2)
         out["loss"].backward()
 
-        assert model.adaptive_A.fast_A_init.grad is not None, \
-            "BPTT broken: fast_A_init has no gradient"
+        # fast_A_init is now a frozen zero buffer; check a real slow param
+        assert model.adaptive_A.write_key_net[0].weight.grad is not None, \
+            "BPTT broken: write_key_net has no gradient"
 
 
 # ============================================================

@@ -139,9 +139,13 @@ class AdaptiveMemoryLayer(nn.Module):
         # ================================================================
         # FAST WEIGHTS (W) — NOT optimizer parameters
         # ================================================================
-        # Learned *initial* values. These ARE nn.Parameters so the
-        # optimizer can learn good starting points for the fast weights.
-        self.fast_A_init = nn.Parameter(torch.randn(d_model, rank) * 0.01)
+        # fast_A starts at zero every session so the model cannot cheat by
+        # packing task-specific biases into the initial fast weights.
+        # It must earn all improvement through the learned adaptation mechanics.
+        self.register_buffer('fast_A_init', torch.zeros(d_model, rank))
+
+        # fast_B is a learned FIXED projection (never updated during inference).
+        # It defines HOW memories are decoded — a genuine slow parameter.
         self.fast_B_init = nn.Parameter(torch.randn(rank, d_model) * 0.01)
 
         # Runtime fast weights — set by reset_fast_weights().
@@ -158,11 +162,10 @@ class AdaptiveMemoryLayer(nn.Module):
 
     def reset_fast_weights(self, batch_size: int = 1) -> None:
         """
-        Reset fast weights to the learned initial values.
+        Reset fast weights to zero (the fixed initial values).
 
         Call at the start of every session / episode.  Uses ``.clone()``
-        (NOT ``.detach()``) so that gradients flow back to
-        ``fast_A_init`` / ``fast_B_init`` during training.
+        so the resulting tensor is a fresh leaf in the autograd graph.
         """
         self.fast_A = (
             self.fast_A_init

@@ -61,7 +61,8 @@ class TestConstruction:
 
     def test_has_slow_parameters(self, layer):
         param_names = {n for n, _ in layer.named_parameters()}
-        assert "fast_A_init" in param_names
+        # fast_A_init is a frozen zero buffer, NOT a parameter
+        assert "fast_A_init" not in param_names
         assert "fast_B_init" in param_names
         # Surprise net, lr net, etc.
         assert any("surprise_net" in n for n in param_names)
@@ -107,9 +108,16 @@ class TestFastWeightLifecycle:
         assert layer.prev_h is None
 
     def test_reset_fast_weights_have_grad_fn(self, layer):
-        # During training, fast weights must be in the computation graph
-        assert layer.fast_A.grad_fn is not None or layer.fast_A.requires_grad
-        assert layer.fast_B.grad_fn is not None or layer.fast_B.requires_grad
+        # fast_A_init is now a zero buffer; after reset fast_A has no grad_fn.
+        # After the first adapt step, delta_A (from slow params) is added,
+        # so fast_A enters the computation graph.
+        assert layer.fast_A.grad_fn is None  # zero buffer, not yet in graph
+        layer.train()
+        dummy = torch.randn(BATCH, SEQ_LEN, D_MODEL)
+        _ = layer(dummy, do_adapt=True)  # adapt: fast_A = 0 + delta_A
+        assert layer.fast_A.grad_fn is not None, (
+            "fast_A has no grad_fn after first adapt — BPTT chain broken"
+        )
 
     def test_partial_reset_blends(self, layer):
         # Modify fast weights
@@ -227,19 +235,18 @@ class TestSelfModification:
 
 class TestGradientFlow:
     def test_grad_flows_to_fast_A_init(self, layer, dummy_input):
-        """The most critical test: gradients must reach fast_A_init."""
+        """fast_A_init is now a frozen zero buffer. Verify BPTT reaches
+        the write networks (the slow params that actually generate delta_A)."""
         layer.train()
         layer.reset_fast_weights(BATCH)
 
-        # Adapt, then read, then compute loss
         out = layer(dummy_input, do_adapt=True)
         loss = out.sum()
         loss.backward()
 
-        assert layer.fast_A_init.grad is not None, (
-            "No gradient on fast_A_init — BPTT chain is broken!"
-        )
-        assert layer.fast_A_init.grad.abs().sum() > 0
+        wk = layer.write_key_net[0].weight
+        assert wk.grad is not None, "No gradient on write_key_net — BPTT chain is broken!"
+        assert wk.grad.abs().sum() > 0
 
     def test_grad_flows_to_fast_B_init(self, layer, dummy_input):
         layer.train()
@@ -292,8 +299,9 @@ class TestGradientFlow:
         loss = out.sum()
         loss.backward()
 
-        assert layer.fast_A_init.grad is not None
-        assert layer.fast_A_init.grad.abs().sum() > 0
+        wk = layer.write_key_net[0].weight
+        assert wk.grad is not None
+        assert wk.grad.abs().sum() > 0
 
 
 # ============================================================
@@ -363,7 +371,9 @@ class TestBatchIndependence:
 # ============================================================
 
 class TestDiagnostics:
-    def test_fast_weight_stats(self, layer):
+    def test_fast_weight_stats(self, layer, dummy_input):
+        # fast_A starts at zero; norm only becomes positive after adaptation
+        _ = layer(dummy_input, do_adapt=True)
         stats = layer.fast_weight_stats()
         assert "fast_A_norm" in stats
         assert "fast_B_norm" in stats

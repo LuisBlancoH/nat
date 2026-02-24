@@ -174,9 +174,9 @@ class TestBPTT:
         out = model(input_ids, labels=target_ids)
         out["loss"].backward()
 
-        # fast_A_init should get gradient from both passes
-        grad = model.adaptive_A.fast_A_init.grad
-        assert grad is not None, "fast_A_init has no gradient after 2-pass BPTT"
+        # fast_A_init is now a frozen zero buffer; check a real slow param
+        grad = model.adaptive_A.write_key_net[0].weight.grad
+        assert grad is not None, "write_key_net has no gradient after 2-pass BPTT"
         assert grad.abs().sum() > 0
 
 
