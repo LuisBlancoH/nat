@@ -176,7 +176,11 @@ def _run_validation(
     """Run a no-grad validation pass over ``val_dataloader``.
 
     Returns averaged metrics: ``val_loss``, ``val_improvement``,
-    ``val_adaptation_benefit``, ``val_baseline_loss``.
+    ``val_adaptation_benefit``, ``val_baseline_loss``,
+    ``val_frozen_loss``, ``val_frozen_benefit``.
+
+    ``val_frozen_loss`` is the loss of the raw frozen Qwen 3 base model
+    (no adaptive layers at all), giving a ground-truth reference.
 
     If ``max_batches`` is 0 the entire loader is consumed.
     """
@@ -189,6 +193,8 @@ def _run_validation(
     total_improvement = 0.0
     total_baseline = 0.0
     total_benefit = 0.0
+    total_frozen = 0.0
+    total_frozen_benefit = 0.0
     n_batches = 0
 
     with torch.no_grad():
@@ -263,11 +269,27 @@ def _run_validation(
                 labels=labels[:, logits_offset:] if labels is not None else None,
             )
 
+            # ---- Frozen Qwen 3 baseline (no NAT at all) ----
+            frozen_out = model.base_model(
+                input_ids=input_ids,
+                position_ids=torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1),
+                use_cache=False,
+            )
+            frozen_logits = frozen_out.logits[:, logits_offset:, :]
+            _, fr_per_prob, _ = compute_episodic_loss(
+                frozen_logits, input_ids[:, logits_offset:],
+                eval_spans, 0.0,
+                labels=labels[:, logits_offset:] if labels is not None else None,
+            )
+
             total_loss += loss_t.item()
             total_improvement += impr_t.item()
             bl_val = sum(bl_per_prob) / len(bl_per_prob) if bl_per_prob else 0.0
+            fr_val = sum(fr_per_prob) / len(fr_per_prob) if fr_per_prob else 0.0
             total_baseline += bl_val
             total_benefit += (bl_val - loss_t.item())
+            total_frozen += fr_val
+            total_frozen_benefit += (fr_val - loss_t.item())
             n_batches += 1
 
     model.train()
@@ -280,6 +302,8 @@ def _run_validation(
         "val_improvement": total_improvement / n_batches,
         "val_baseline_loss": total_baseline / n_batches,
         "val_adaptation_benefit": total_benefit / n_batches,
+        "val_frozen_loss": total_frozen / n_batches,
+        "val_frozen_benefit": total_frozen_benefit / n_batches,
     }
 
 
@@ -693,10 +717,17 @@ def train_phase1(
                     max_batches=20,  # cap to ~20 batches for speed
                 )
                 if val_metrics:
+                    frozen_str = ""
+                    if "val_frozen_loss" in val_metrics:
+                        frozen_str = (
+                            f"  frozen={val_metrics['val_frozen_loss']:.4f}"
+                            f"  vs_frozen={val_metrics['val_frozen_benefit']:.4f}"
+                        )
                     logger.info(
                         f"  [val] loss={val_metrics['val_loss']:.4f}  "
                         f"benefit={val_metrics['val_adaptation_benefit']:.4f}  "
                         f"baseline={val_metrics['val_baseline_loss']:.4f}"
+                        f"{frozen_str}"
                     )
                     if use_wandb:
                         import wandb
