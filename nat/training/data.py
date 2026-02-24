@@ -173,7 +173,7 @@ class MultiDomainEpisodeDataset(Dataset):
     into a single tokenised sequence.
 
     Domains:
-      - GSM8K              — single pool, no-repeat sampling draws 8 distinct problems
+      - GSM8K              — grouped by keyword-inferred topic (~10 buckets: money, geometry, ratio, etc.)
       - Hendrycks MATH     — grouped by subject + difficulty level
       - MATH-Hard          — grouped by subject + difficulty level
       - OpenR1-Math-220k   — grouped by problem_type; filtered to verified-correct only
@@ -183,6 +183,29 @@ class MultiDomainEpisodeDataset(Dataset):
 
     Falls back gracefully if a dataset is unavailable.
     """
+
+    # Keyword → topic bucket for GSM8K (applied in order; first match wins)
+    _GSM8K_TOPICS: list[tuple[str, list[str]]] = [
+        ("percentage",    ["percent", "discount", "tax", "interest rate", "markup"]),
+        ("ratio_rate",    ["ratio", "proportion", "rate per", "speed", "mph", "km/h"]),
+        ("distance_time", ["distance", "travel", "drove", "walked", "minutes to"]),
+        ("geometry",      ["area", "perimeter", "length", "width", "height",
+                           "triangle", "rectangle", "circle", "square", "volume"]),
+        ("fractions",     ["fraction", "half of", "quarter", "one-third", "two-thirds"]),
+        ("probability",   ["probability", "chance", "likely", "randomly"]),
+        ("statistics",    ["average", "mean", "median", "total divided"]),
+        ("age",           ["years old", "older than", "younger than", "age"]),
+        ("money",         ["dollar", "cost", "price", "paid", "bought", "sold",
+                           "profit", "loss", "revenue", "earn"]),
+    ]
+
+    @classmethod
+    def _gsm8k_topic(cls, question: str) -> str:
+        q = question.lower()
+        for topic, keywords in cls._GSM8K_TOPICS:
+            if any(kw in q for kw in keywords):
+                return topic
+        return "arithmetic"
 
     SOURCES = [
         # ── Math: GSM8K — 7.5k grade-school word problems with step-by-step solutions ──
@@ -195,9 +218,11 @@ class MultiDomainEpisodeDataset(Dataset):
                 ex.get("question", ""),
                 ex.get("answer", ""),
             ),
-            # Single bucket is fine — no-repeat sampling draws 8 distinct
-            # problems per episode from the full pool.
-            "grouper": lambda ex: "gsm8k",
+            # Keyword-based topic grouping — ~10 buckets, ~500-1000 problems each.
+            # Episodes within a bucket share the same math operation type.
+            "grouper": lambda ex: MultiDomainEpisodeDataset._gsm8k_topic(
+                ex.get("question", "")
+            ),
         },
         # ── Math: Hendrycks MATH (all 7 subjects) ──
         *[
