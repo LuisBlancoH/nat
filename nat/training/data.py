@@ -9,13 +9,13 @@ Provides:
 
 Phase 1 data sources (multi-domain with reasoning traces)
 ---------------------------------------------------------
-- GSM8K — grade-school math word problems
+- camel-ai/math — 50k problems across 25 sub-topics with step-by-step solutions
 - Hendrycks MATH (EleutherAI) — competition math across 7 subjects
 - MATH-Hard (lighteval) — hard competition math problems
-- CodeForces-CoTs (open-r1) — competitive programming with CoT
-- LexGLUE SCOTUS — US Supreme Court legal opinions
+- CodeForces-CoTs (open-r1) — competitive programming with CoT, grouped by difficulty tier
+- LexGLUE ECtHR — European human rights cases grouped by violated article
 - DROP — reading comprehension with discrete reasoning
-- ScienceQA — science questions with explanations
+- ScienceQA — science questions grouped by fine-grained skill (379 skills)
 
 Phase 2 uses the same domain datasets for consolidation training.
 
@@ -173,29 +173,30 @@ class MultiDomainEpisodeDataset(Dataset):
     into a single tokenised sequence.
 
     Domains:
-      - GSM8K              — grouped as single bucket
+      - camel-ai/math      — grouped by sub_topic (~hundreds of exercise types)
       - Hendrycks MATH     — grouped by subject + difficulty level
       - MATH-Hard          — grouped by subject + difficulty level
-      - CodeForces-CoTs    — grouped by contest name
-      - LexGLUE SCOTUS     — grouped by label (issue area)
-      - DROP               — grouped by shared passage
-      - ScienceQA          — grouped by skill category
+      - CodeForces-CoTs    — grouped by contest_type + index (difficulty tier)
+      - LexGLUE ECtHR      — grouped by first violated ECHR article
+      - DROP               — grouped by shared passage (section_id)
+      - ScienceQA          — grouped by skill (379 fine-grained skills)
 
     Falls back gracefully if a dataset is unavailable.
     """
 
     SOURCES = [
-        # ── Math: GSM8K (grade-school math) ──
+        # ── Math: camel-ai/math — 50k problems, 25 sub-topics ──
         {
-            "name": "gsm8k",
-            "config": "main",
+            "name": "camel-ai/math",
+            "config": None,
             "domain": "math",
             "split": "train",
             "formatter": lambda ex: (
-                ex.get("question", ""),
-                ex.get("answer", ""),
+                ex.get("message_1", ""),
+                ex.get("message_2", ""),
             ),
-            "grouper": lambda ex: "gsm8k",
+            # sub_topic gives fine-grained groups like "Solving linear equations"
+            "grouper": lambda ex: ex.get("sub_topic", ex.get("topic;", "math")),
         },
         # ── Math: Hendrycks MATH (all 7 subjects) ──
         *[
@@ -238,20 +239,30 @@ class MultiDomainEpisodeDataset(Dataset):
                 ex.get("description", ex.get("prompt", "")),
                 ex.get("generation", ex.get("editorial", "")),
             ),
-            # Group by contest name
-            "grouper": lambda ex: ex.get("contest_name", "unknown"),
+            # Group by contest_type + problem index (A/B/C/D = difficulty tier).
+            # No 'tags' field exists in this dataset; index is the best
+            # available difficulty/complexity proxy.
+            "grouper": lambda ex: f"{ex.get('contest_type', 'CF')}_{ex.get('index', 'A')}",
         },
-        # ── Logic: LexGLUE SCOTUS ──
+        # ── Logic: LexGLUE ECtHR (European Court of Human Rights) ──
+        # Full case texts with multi-label article violations as answers.
+        # Grouped by the first violated article (e.g. "3", "6", "8").
         {
             "name": "coastalcph/lex_glue",
-            "config": "scotus",
+            "config": "ecthr_a",
             "domain": "logic",
             "split": "train",
             "formatter": lambda ex: (
-                ex.get("text", ""),
-                str(ex.get("label", "")),
+                ex.get("text", "")[0]
+                if isinstance(ex.get("text"), list) and ex["text"]
+                else str(ex.get("text", "")),
+                ", ".join(str(l) for l in ex.get("labels", []))
+                if ex.get("labels")
+                else "no violation",
             ),
-            "grouper": lambda ex: str(ex.get("label", "unknown")),
+            "grouper": lambda ex: str(ex["labels"][0])
+            if isinstance(ex.get("labels"), list) and ex["labels"]
+            else "no_violation",
         },
         # ── Reading: DROP ──
         {
@@ -286,7 +297,8 @@ class MultiDomainEpisodeDataset(Dataset):
                     else ""
                 ),
             ),
-            "grouper": lambda ex: ex.get("category", ex.get("subject", "science")),
+            # skill has 379 fine-grained groups e.g. "Identify the life cycle of a butterfly"
+            "grouper": lambda ex: ex.get("skill", ex.get("category", "science")),
         },
     ]
 
@@ -777,12 +789,12 @@ def build_domain_dataloader(
     DOMAIN_SOURCE_MAP: dict[str, list[dict]] = {
         "math": [
             {
-                "name": "gsm8k",
-                "config": "main",
+                "name": "camel-ai/math",
+                "config": None,
                 "split": "train",
                 "formatter": lambda ex: (
-                    f"Problem: {ex.get('question', '')}\n"
-                    f"Solution: {ex.get('answer', '')}\n\n"
+                    f"Problem: {ex.get('message_1', '')}\n"
+                    f"Solution: {ex.get('message_2', '')}\n\n"
                 ),
             },
             {
@@ -820,11 +832,11 @@ def build_domain_dataloader(
         "logic": [
             {
                 "name": "coastalcph/lex_glue",
-                "config": "scotus",
+                "config": "ecthr_a",
                 "split": "train",
                 "formatter": lambda ex: (
-                    f"Problem: {ex.get('text', '')}\n"
-                    f"Answer: {str(ex.get('label', ''))}\n\n"
+                    f"Case: {ex['text'][0] if isinstance(ex.get('text'), list) and ex['text'] else str(ex.get('text', ''))}\n"
+                    f"Violated articles: {', '.join(str(l) for l in ex.get('labels', [])) or 'no violation'}\n\n"
                 ),
             },
         ],
