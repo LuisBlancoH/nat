@@ -26,43 +26,38 @@ def detach_kv_cache(past_key_values):
     gradients for θ flow exclusively through the fast-weight updates,
     not through the frozen base-model's attention.
 
-    Always returns the same type as the input (``DynamicCache`` or
-    tuple-of-tuples) so downstream code can call ``.get_seq_length()``
-    etc.
+    Works with ``DynamicCache`` (any transformers version) and legacy
+    tuple-of-tuples.
     """
     if past_key_values is None:
         return None
 
-    # DynamicCache (transformers ≥ 4.36) — has .key_cache / .value_cache
-    if hasattr(past_key_values, "key_cache"):
-        past_key_values.key_cache = [
-            k.detach() for k in past_key_values.key_cache
-        ]
-        past_key_values.value_cache = [
-            v.detach() for v in past_key_values.value_cache
-        ]
-        return past_key_values
-
-    # Legacy tuple-of-tuples: ((k, v), (k, v), ...)
-    # Wrap into a DynamicCache if the class is available, so that
-    # newer transformers versions can call .get_seq_length() on it.
     try:
         from transformers.cache_utils import DynamicCache
-        cache = DynamicCache()
-        for layer_kv in past_key_values:
-            k = layer_kv[0].detach() if layer_kv[0] is not None else None
-            v = layer_kv[1].detach() if layer_kv[1] is not None else None
-            if k is not None and v is not None:
-                cache.key_cache.append(k)
-                cache.value_cache.append(v)
-        return cache
     except ImportError:
-        pass
+        DynamicCache = None
 
-    return tuple(
+    # ---- DynamicCache: convert → detach → reconstruct ----
+    if DynamicCache is not None and isinstance(past_key_values, DynamicCache):
+        # to_legacy_cache() → tuple of (key, value) per layer
+        legacy = past_key_values.to_legacy_cache()
+        detached = tuple(
+            (k.detach(), v.detach()) for k, v in legacy
+        )
+        return DynamicCache.from_legacy_cache(detached)
+
+    # ---- Legacy tuple-of-tuples ----
+    detached = tuple(
         tuple(t.detach() if t is not None else None for t in layer_kv)
         for layer_kv in past_key_values
     )
+    # Wrap into DynamicCache if available so .get_seq_length() works
+    if DynamicCache is not None:
+        try:
+            return DynamicCache.from_legacy_cache(detached)
+        except Exception:
+            pass
+    return detached
 
 
 # ------------------------------------------------------------------ #
