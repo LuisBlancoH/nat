@@ -359,7 +359,7 @@ class MultiDomainEpisodeDataset(Dataset):
         num_episodes: int = 50000,
         seq_len: int = 2048,
         num_problems: int = 8,
-        max_examples_per_source: int = 2_000,
+        max_examples_per_source: int = 10_000,
         cache_dir: str | None = None,
     ):
         super().__init__()
