@@ -16,7 +16,7 @@ beta: 0.999
 session_reset_alpha: 0.5
 
 # Training - Phase 1 (episodic multi-domain meta-learning)
-lr_phase1: 2e-4
+lr_phase1: 5e-4
 num_episodes_p1: 50000
 batch_size: 4
 seq_len: 2048
@@ -28,7 +28,7 @@ num_problems_per_episode: 8
 adapt_problems_p1: 5
 
 # Training - Phase 2 (consolidation across domains)
-lr_phase2: 1e-4
+lr_phase2: 2e-4
 num_runs_p2: 500
 sessions_per_domain_p2: 20
 forgetting_test_sessions_p2: 5

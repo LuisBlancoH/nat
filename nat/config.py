@@ -30,7 +30,7 @@ class NATConfig:
     session_reset_alpha: float = 0.5
 
     # Training - Phase 1 (episodic multi-domain meta-learning)
-    lr_phase1: float = 2e-4
+    lr_phase1: float = 5e-4
     num_episodes_p1: int = 50000
     batch_size: int = 4
     seq_len: int = 2048
@@ -48,7 +48,7 @@ class NATConfig:
     val_episodes: int = 500     # number of validation episodes per eval pass
 
     # Training - Phase 2 (consolidation across domains)
-    lr_phase2: float = 1e-4
+    lr_phase2: float = 2e-4
     num_runs_p2: int = 500
     sessions_per_domain_p2: int = 20
     forgetting_test_sessions_p2: int = 5
