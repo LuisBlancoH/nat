@@ -418,7 +418,9 @@ class MultiDomainEpisodeDataset(Dataset):
 
             # ── Fetch from HuggingFace ─────────────────────────────────
             try:
-                logger.info(f"Loading {src['name']} (max {self.max_examples_per_source} examples)...")
+                label = src["name"] + (f"/{src['config']}" if src.get("config") else "")
+                print(f"[data] Loading {label} ...", flush=True)
+                logger.info(f"Loading {label} (max {self.max_examples_per_source} examples)...")
                 load_kwargs: dict[str, Any] = {}
                 if src.get("config"):
                     load_kwargs["name"] = src["config"]
@@ -441,11 +443,11 @@ class MultiDomainEpisodeDataset(Dataset):
                 for n_seen, example in enumerate(ds):
                     if n_seen >= self.max_examples_per_source:
                         break
-                    if n_seen > 0 and n_seen % 1000 == 0:
-                        n_groups = len(groups_dict)
-                        logger.info(
-                            f"  {src['name']}: {n_seen}/{self.max_examples_per_source}"
-                            f" examples, {n_groups} groups so far..."
+                    if n_seen % 100 == 0:
+                        print(
+                            f"\r[data]   {label}: {n_seen}/{self.max_examples_per_source}"
+                            f" ({len(groups_dict)} groups)",
+                            end="", flush=True,
                         )
                     try:
                         if filt is not None and not filt(example):
@@ -481,8 +483,9 @@ class MultiDomainEpisodeDataset(Dataset):
                         self.domain_groups[domain] = []
                     self.domain_groups[domain].extend(groups)
                     total = sum(len(g) for g in groups)
+                    print(f"\r[data]   {label}: done — {total} pairs, {len(groups)} groups [{domain}]", flush=True)
                     logger.info(
-                        f"  → {src['name']}: {total} pairs "
+                        f"  → {label}: {total} pairs "
                         f"({len(groups)} groups) [domain={domain}]"
                     )
                     # Save to disk cache — next run will skip the network fetch
@@ -493,8 +496,9 @@ class MultiDomainEpisodeDataset(Dataset):
                         pass  # cache write failure is non-fatal
                     loaded.append(src["name"])
                 else:
+                    print(f"\r[data]   {label}: 0 valid groups — skipping", flush=True)
                     logger.warning(
-                        f"  → {src['name']}: loaded but 0 valid groups"
+                        f"  → {label}: loaded but 0 valid groups"
                     )
                     failed.append(src["name"])
             except Exception as e:
