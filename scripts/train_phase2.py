@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Entry point for Phase 2: Episodic multi-task training.
+Entry point for Phase 2: Consolidation dynamics training.
 
 Usage
 -----
@@ -33,13 +33,13 @@ import torch
 
 from nat.config import NATConfig
 from nat.model.nat_model import NATModel
-from nat.training.phase2_episodic import train_phase2
-from nat.training.phase1_meta_learn import load_checkpoint
+from nat.training.phase2_consolidation import train_phase2
+from nat.training.train_utils import load_checkpoint
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="NAT Phase 2: Episodic multi-task training"
+        description="NAT Phase 2: Consolidation dynamics training"
     )
     parser.add_argument(
         "--config",
@@ -58,10 +58,10 @@ def main():
         help="Enable Weights & Biases logging",
     )
     parser.add_argument(
-        "--episodes",
+        "--runs",
         type=int,
         default=None,
-        help="Override num_episodes_p2 from config",
+        help="Override num_runs_p2 from config",
     )
     parser.add_argument(
         "--resume",
@@ -84,8 +84,8 @@ def main():
 
     # ---- Load config ----
     config = NATConfig.from_yaml(args.config)
-    if args.episodes is not None:
-        config.num_episodes_p2 = args.episodes
+    if args.runs is not None:
+        config.num_runs_p2 = args.runs
 
     logging.info(f"Config: {config.to_dict()}")
 
@@ -99,9 +99,11 @@ def main():
         logging.info(f"Loaded checkpoint from episode {episode}")
 
     # ---- Print summary ----
-    trainable = model.get_trainable_parameters()
-    total_params = sum(p.numel() for p in trainable)
-    logging.info(f"Trainable parameters: {total_params:,}")
+    consolidation_params = sum(
+        p.numel() for p in model.consolidation.parameters()
+    )
+    logging.info(f"Consolidation parameters: {consolidation_params:,}")
+    logging.info("+ 2 scalar parameters: β (logit), α (logit)")
     model.print_param_summary()
 
     # ---- Train ----
@@ -113,7 +115,9 @@ def main():
     )
 
     logging.info(
-        f"Phase 2 complete — final loss: {result['final_loss']:.4f}, "
+        f"Phase 2 complete — "
+        f"β={result['final_beta']:.4f}, α={result['final_alpha']:.3f}, "
+        f"best improvement={result['best_improvement']:+.4f}, "
         f"saved to: {result['save_path']}"
     )
 

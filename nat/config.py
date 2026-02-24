@@ -16,54 +16,49 @@ class NATConfig:
     """Configuration for the Nested Adaptive Transformer."""
 
     # Model
-    base_model_name: str = "Qwen/Qwen2.5-1.5B"
-    rank: int = 32
-    d_hidden: int = 256
+    base_model_name: str = "Qwen/Qwen3-4B"
+    rank: int = 64
+    d_hidden: int = 512
 
     # Adaptation
-    adapt_every_n: int = 32
-    lr_clamp: float = 0.1
-    fast_weight_max_norm: float = 10.0
+    adapt_every_n: int = 64
+    lr_clamp: float = 0.05
+    fast_weight_max_norm: float = 8.0
 
     # Consolidation
     beta: float = 0.999
     session_reset_alpha: float = 0.5
 
-    # Training - Phase 1
-    lr_phase1: float = 3e-4
+    # Training - Phase 1 (episodic multi-domain meta-learning)
+    lr_phase1: float = 2e-4
     num_episodes_p1: int = 50000
     batch_size: int = 4
     seq_len: int = 2048
     truncated_bptt: int = 16
     grad_clip: float = 1.0
     weight_decay: float = 0.01
-
-    # Training - Phase 2
-    lr_phase2: float = 3e-4
-    num_episodes_p2: int = 30000
     improvement_weight: float = 0.1
     num_problems_per_episode: int = 8
-    adapt_problems_p2: int = 5
-    batch_size_p2: int = 4
+    adapt_problems_p1: int = 5
 
-    # Training - Phase 3
-    lr_phase3: float = 1e-4
-    num_runs_p3: int = 500
-    sessions_per_domain_p3: int = 20
-    forgetting_test_sessions_p3: int = 5
-    p3_truncate_sessions: int = 4
+    # Training - Phase 2 (consolidation across domains)
+    lr_phase2: float = 1e-4
+    num_runs_p2: int = 500
+    sessions_per_domain_p2: int = 20
+    forgetting_test_sessions_p2: int = 5
+    p2_truncate_sessions: int = 4
 
     # Device
     device: str = "auto"
     base_dtype: str = "bfloat16"
 
     # Performance / device-specific
-    gradient_checkpointing: bool = False
+    gradient_checkpointing: bool = True
     compile_model: bool = False
     num_workers: int = 0
     pin_memory: bool = False
     empty_cache_every: int = 0         # 0 = disabled
-    tf32_matmul: bool = False          # A100 TF32 tensor cores
+    tf32_matmul: bool = True           # A100 TF32 tensor cores
     cudnn_benchmark: bool = False      # cuDNN auto-tuner
     cuda_amp: bool = False             # torch.amp autocast for frozen layers
 
@@ -78,7 +73,7 @@ class NATConfig:
     save_path: str = "checkpoints/phase1.pt"
 
     # Derived (set in __post_init__)
-    lr: float = field(default=3e-4, init=False)
+    lr: float = field(default=2e-4, init=False)
     num_episodes: int = field(default=50000, init=False)
 
     def __post_init__(self):

@@ -52,7 +52,7 @@ from nat.training.data import (
     SyntheticEpisodicDataset,
     collate_episodic,
 )
-from nat.training.phase3_consolidation import (
+from nat.training.phase2_consolidation import (
     SyntheticDomainDataset,
     DOMAINS,
 )

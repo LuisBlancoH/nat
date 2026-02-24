@@ -1,18 +1,9 @@
 """
-Phase 2: Episodic multi-task training.
+Phase 1: Episodic multi-domain meta-learning.
 
-What changes from Phase 1
--------------------------
-- Data is *structured*: each episode is a sequence of related
-  problems of increasing difficulty.
-- The loss measures per-problem performance and includes an
-  **improvement bonus** that rewards the model for doing better on
-  later problems (evidence that the adaptive layers are learning
-  within the episode).
-
-What is trained
----------------
-Same as Phase 1: θ (slow parameters of adaptive + consolidation).
+Trains θ (slow parameters of adaptive + consolidation layers) on
+episodes of related problems from multiple domains (math, code,
+logic, reading, science).
 
 Episode structure
 -----------------
@@ -45,8 +36,8 @@ Usage
 -----
 ::
 
-    from nat.training.phase2_episodic import train_phase2
-    train_phase2(model, config)
+    from nat.training.phase1_episodic import train_phase1
+    train_phase1(model, config)
 """
 
 from __future__ import annotations
@@ -62,10 +53,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from nat.training.data import build_phase2_dataloader
-from nat.training.phase1_meta_learn import (
-    _maybe_truncate,
-    _save_checkpoint,
+from nat.training.data import build_phase1_dataloader
+from nat.training.train_utils import (
+    maybe_truncate as _maybe_truncate,
+    save_checkpoint as _save_checkpoint,
     load_checkpoint,
 )
 
@@ -231,7 +222,7 @@ def train_one_episodic_step(
         per_example_spans = problem_spans  # type: ignore[assignment]
 
     num_problems = max(len(s) for s in per_example_spans)
-    adapt_problems = getattr(config, "adapt_problems_p2", num_problems * 5 // 8)
+    adapt_problems = getattr(config, "adapt_problems_p1", num_problems * 5 // 8)
     adapt_problems = min(adapt_problems, num_problems - 1)  # ≥1 eval problem
 
     # ---- Determine which chunks need logits ----
@@ -372,10 +363,10 @@ def train_one_episodic_step(
 
 
 # ------------------------------------------------------------------ #
-# Full Phase 2 training loop                                           #
+# Full Phase 1 training loop                                           #
 # ------------------------------------------------------------------ #
 
-def train_phase2(
+def train_phase1(
     model,
     config,
     *,
@@ -384,13 +375,13 @@ def train_phase2(
     synthetic: bool = False,
 ) -> dict[str, Any]:
     """
-    Full Phase 2 episodic training loop.
+    Full Phase 1 episodic training loop.
 
     Parameters
     ----------
     model : NATModel
     config : NATConfig
-        Key fields: ``lr_phase2``, ``num_episodes_p2``,
+        Key fields: ``lr_phase1``, ``num_episodes_p1``,
         ``improvement_weight``, ``num_problems_per_episode``.
     dataloader : DataLoader, optional
     use_wandb : bool
@@ -407,13 +398,13 @@ def train_phase2(
 
     # ---- Optimizer & scheduler ----
     trainable = model.get_trainable_parameters()
-    lr = getattr(config, "lr_phase2", 3e-4)
+    lr = getattr(config, "lr_phase1", 2e-4)
     optimizer = torch.optim.AdamW(
         trainable,
         lr=lr,
         weight_decay=getattr(config, "weight_decay", 0.01),
     )
-    num_episodes = getattr(config, "num_episodes_p2", 30000)
+    num_episodes = getattr(config, "num_episodes_p1", 50000)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=num_episodes
     )
@@ -421,7 +412,7 @@ def train_phase2(
     # ---- Data ----
     if dataloader is None:
         tokenizer = getattr(model, "tokenizer", None)
-        dataloader = build_phase2_dataloader(
+        dataloader = build_phase1_dataloader(
             config,
             tokenizer=tokenizer,
             synthetic=synthetic,
@@ -453,10 +444,10 @@ def train_phase2(
     # ---- Logging config ----
     log_every = getattr(config, "log_every", 50)
     save_every = getattr(config, "save_every", 1000)
-    save_path = getattr(config, "save_path", "checkpoints/phase2.pt")
+    save_path = getattr(config, "save_path", "checkpoints/phase1.pt")
 
     logger.info(
-        f"Phase 2 episodic training — {num_episodes} episodes, "
+        f"Phase 1 episodic training — {num_episodes} episodes, "
         f"lr={lr}, device={device}"
     )
 
@@ -573,7 +564,7 @@ def train_phase2(
 
     elapsed = time.time() - t0
     logger.info(
-        f"Phase 2 complete — {episode_idx} episodes in {elapsed:.0f}s, "
+        f"Phase 1 complete — {episode_idx} episodes in {elapsed:.0f}s, "
         f"final loss={final_loss:.4f}"
     )
 

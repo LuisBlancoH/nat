@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """
-Entry point for Phase 1: Meta-learn the learning rule θ.
+Entry point for Phase 1: Episodic multi-domain meta-learning.
 
 Usage
 -----
 ::
 
-    # Full training with Qwen2.5-1.5B
+    # Full training with Qwen3-4B
     python scripts/train_phase1.py --config configs/base.yaml
 
     # Small-scale debugging on Apple Silicon
@@ -31,12 +31,13 @@ import torch
 
 from nat.config import NATConfig
 from nat.model.nat_model import NATModel
-from nat.training.phase1_meta_learn import train_phase1
+from nat.training.phase1_episodic import train_phase1
+from nat.training.train_utils import load_checkpoint
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="NAT Phase 1: Meta-learn the learning rule θ"
+        description="NAT Phase 1: Episodic multi-domain meta-learning"
     )
     parser.add_argument(
         "--config",
@@ -83,7 +84,6 @@ def main():
     config = NATConfig.from_yaml(args.config)
     if args.episodes is not None:
         config.num_episodes_p1 = args.episodes
-        config.num_episodes = args.episodes
 
     logging.info(f"Config: {config.to_dict()}")
 
@@ -93,7 +93,6 @@ def main():
 
     # ---- Resume from checkpoint ----
     if args.resume:
-        from nat.training.phase1_meta_learn import load_checkpoint
         episode = load_checkpoint(model, args.resume)
         logging.info(f"Resumed from episode {episode}")
 

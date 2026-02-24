@@ -28,7 +28,7 @@ import torch
 
 from nat.config import NATConfig
 from nat.model.nat_model import NATModel
-from nat.training.phase1_meta_learn import load_checkpoint
+from nat.training.train_utils import load_checkpoint
 
 logger = logging.getLogger(__name__)
 

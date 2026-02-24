@@ -2,26 +2,33 @@
 Data loading and episode construction for NAT training.
 
 Provides:
-  - ``build_phase1_dataloader``  — diverse text for meta-learning θ.
-  - ``build_phase2_dataloader``  — episodic multi-task data for Phase 2.
+  - ``build_phase1_dataloader``  — episodic multi-domain data for Phase 1.
   - ``build_text_dataset``       — generic tokenised-chunked dataset.
   - ``EpisodeDataset``           — wraps an iterable HF dataset into
     fixed-length token sequences suitable for episodic training.
 
-Supported data sources
-----------------------
-- HuggingFace ``datasets`` streaming corpora (C4, SlimPajama, etc.)
-- Local text / JSONL files
-- A lightweight *synthetic* dataset for unit-testing and development
-  (``SyntheticEpisodeDataset``).
+Phase 1 data sources (multi-domain with reasoning traces)
+---------------------------------------------------------
+- AMPS Khan Academy — math exercises with LaTeX solutions
+- MATH (Hendrycks) — competition math with step-by-step proofs
+- CodeForces-CoTs (open-r1) — competitive programming with CoT
+- AR-LSAT — analytical reasoning scenarios (CoT generated)
+- DROP — reading comprehension with discrete reasoning (CoT generated)
+- ScienceQA — science questions with explanations
+
+Phase 2 uses the same domain datasets for consolidation training.
+
+Synthetic datasets are provided for unit-testing and development.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
 import random
+from pathlib import Path
 from typing import Any, Iterator
 
 import torch
@@ -74,302 +81,6 @@ class SyntheticEpisodeDataset(Dataset):
 
 
 # ------------------------------------------------------------------ #
-# Tokenised-and-chunked wrapper for HF streaming datasets              #
-# ------------------------------------------------------------------ #
-
-class TokenChunkedDataset(IterableDataset):
-    """
-    Streams text from a HuggingFace dataset, tokenises on the fly,
-    and yields fixed-length chunks of ``seq_len`` tokens.
-
-    This is an *infinite* iterable dataset (wraps around).  Use it
-    with a ``DataLoader(dataset, batch_size=...)`` and stop after
-    ``num_episodes`` batches.
-
-    Parameters
-    ----------
-    hf_dataset
-        A HuggingFace ``IterableDataset`` (``streaming=True``).
-    tokenizer
-        A HuggingFace tokenizer.
-    seq_len : int
-        Number of tokens per chunk.
-    text_column : str
-        Name of the text column in the HF dataset.
-    """
-
-    def __init__(
-        self,
-        hf_dataset,
-        tokenizer,
-        seq_len: int = 2048,
-        text_column: str = "text",
-    ):
-        super().__init__()
-        self.hf_dataset = hf_dataset
-        self.tokenizer = tokenizer
-        self.seq_len = seq_len
-        self.text_column = text_column
-
-    def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
-        buffer: list[int] = []
-
-        for example in self.hf_dataset:
-            text = example[self.text_column]
-            tokens = self.tokenizer.encode(text, add_special_tokens=False)
-            buffer.extend(tokens)
-
-            while len(buffer) >= self.seq_len:
-                chunk = buffer[: self.seq_len]
-                buffer = buffer[self.seq_len :]
-                yield {"input_ids": torch.tensor(chunk, dtype=torch.long)}
-
-
-class DocumentChunkedDataset(IterableDataset):
-    """
-    Streams text from a HuggingFace dataset, tokenises on the fly,
-    and yields **one document per episode** (no cross-document
-    concatenation).
-
-    Each document is either:
-    - Truncated to ``seq_len`` if longer, or
-    - Skipped if shorter than ``min_len`` tokens.
-
-    This preserves within-document coherence which is critical for
-    Phase 1 meta-learning: the model needs the adaptation context
-    (first 75 %) to be relevant to the evaluation context (last 25 %).
-
-    Parameters
-    ----------
-    hf_dataset
-        A HuggingFace ``IterableDataset`` (``streaming=True``).
-    tokenizer
-        A HuggingFace tokenizer.
-    seq_len : int
-        Number of tokens per episode.
-    min_len : int
-        Minimum document length in tokens.  Shorter docs are skipped.
-        Defaults to ``seq_len // 2`` (ensure at least half is real).
-    text_column : str
-        Name of the text column in the HF dataset.
-    pad_token_id : int | None
-        Token used for padding short-but-accepted documents.  If None,
-        uses ``tokenizer.eos_token_id``.
-    """
-
-    def __init__(
-        self,
-        hf_dataset,
-        tokenizer,
-        seq_len: int = 2048,
-        min_len: int | None = None,
-        text_column: str = "text",
-        pad_token_id: int | None = None,
-    ):
-        super().__init__()
-        self.hf_dataset = hf_dataset
-        self.tokenizer = tokenizer
-        self.seq_len = seq_len
-        self.min_len = min_len if min_len is not None else seq_len // 2
-        self.text_column = text_column
-        self.pad_token_id = (
-            pad_token_id
-            if pad_token_id is not None
-            else getattr(tokenizer, "eos_token_id", 0)
-        )
-
-    def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
-        for example in self.hf_dataset:
-            text = example[self.text_column]
-            tokens = self.tokenizer.encode(text, add_special_tokens=False)
-
-            if len(tokens) < self.min_len:
-                continue  # skip very short documents
-
-            if len(tokens) >= self.seq_len:
-                # Truncate — take a random window for variety
-                max_start = len(tokens) - self.seq_len
-                start = random.randint(0, max_start) if max_start > 0 else 0
-                chunk = tokens[start : start + self.seq_len]
-                real_len = self.seq_len
-            else:
-                # Pad to seq_len (right-pad with pad_token_id)
-                real_len = len(tokens)
-                chunk = tokens + [self.pad_token_id] * (
-                    self.seq_len - real_len
-                )
-
-            input_ids = torch.tensor(chunk, dtype=torch.long)
-
-            # Labels: -100 at padding positions so loss ignores them
-            labels = input_ids.clone()
-            if real_len < self.seq_len:
-                labels[real_len:] = -100
-
-            yield {"input_ids": input_ids, "labels": labels}
-
-
-# ------------------------------------------------------------------ #
-# Dataloader builders                                                  #
-# ------------------------------------------------------------------ #
-
-def build_phase1_dataloader(
-    config,
-    tokenizer=None,
-    *,
-    synthetic: bool = False,
-) -> DataLoader:
-    """
-    Build a ``DataLoader`` for Phase 1 meta-learning.
-
-    Parameters
-    ----------
-    config : NATConfig
-        Must have ``seq_len``, ``batch_size``, ``num_episodes_p1``.
-    tokenizer : optional
-        HuggingFace tokenizer.  Required unless ``synthetic=True``.
-    synthetic : bool
-        If ``True``, use ``SyntheticEpisodeDataset`` instead of real data.
-        Intended for tests and fast iteration.
-
-    Returns
-    -------
-    DataLoader
-    """
-    if synthetic:
-        dataset = SyntheticEpisodeDataset(
-            num_episodes=config.num_episodes_p1,
-            seq_len=config.seq_len,
-            vocab_size=getattr(config, "vocab_size", 1000),
-        )
-        return DataLoader(
-            dataset,
-            batch_size=config.batch_size,
-            shuffle=True,
-            drop_last=True,
-            num_workers=0,
-        )
-
-    # ---- Real data ----
-    assert tokenizer is not None, (
-        "tokenizer is required for non-synthetic data. "
-        "Pass synthetic=True for testing."
-    )
-
-    try:
-        from datasets import load_dataset
-    except ImportError as exc:
-        raise ImportError(
-            "Install HuggingFace datasets: pip install datasets"
-        ) from exc
-
-    # Phase 1 meta-learning needs *within-document coherence*:
-    # the model adapts on the first 75 % of an episode and is
-    # evaluated on the last 25 %.  If those come from different
-    # documents, the adaptation signal is pure noise.
-    #
-    # We therefore:
-    #   1. Prioritise long-document corpora (Wikipedia, FineWeb-Edu)
-    #      over short-document ones (C4 averages ~500 tokens).
-    #   2. Use DocumentChunkedDataset which keeps one document per
-    #      episode (no cross-document concatenation).
-    PHASE1_SOURCES = [
-        {   # Wikipedia: long articles (avg ~2-3K tokens), highly coherent
-            "name": "wikimedia/wikipedia",
-            "config": "20231101.en",
-            "text_column": "text",
-        },
-        {   # FineWeb-Edu: curated educational content, long, diverse
-            "name": "HuggingFaceFW/fineweb-edu",
-            "config": "sample-10BT",
-            "text_column": "text",
-        },
-        {   # C4: last resort — shorter docs, cross-doc noise
-            "name": getattr(config, "dataset_name", "allenai/c4"),
-            "config": getattr(config, "dataset_config", "en"),
-            "text_column": getattr(config, "text_column", "text"),
-        },
-    ]
-
-    hf_ds = None
-    text_column = "text"
-    for src in PHASE1_SOURCES:
-        try:
-            logger.info(
-                f"Loading streaming dataset: {src['name']} ({src['config']})"
-            )
-            hf_ds = load_dataset(
-                src["name"],
-                src["config"],
-                split="train",
-                streaming=True,
-            )
-            # Shuffle the stream so consecutive episodes come from
-            # diverse topics.  buffer_size=10000 means ~10K documents
-            # are held in memory and sampled randomly.  Without this,
-            # Wikipedia streams alphabetically by article title.
-            hf_ds = hf_ds.shuffle(seed=42, buffer_size=10000)
-            text_column = src["text_column"]
-            logger.info(f"  → loaded successfully")
-            break
-        except Exception as e:
-            logger.warning(f"  → {src['name']}: failed ({e}), trying next...")
-
-    if hf_ds is None:
-        raise RuntimeError(
-            "Could not load any Phase 1 text corpus. "
-            "Check network connectivity."
-        )
-
-    # Use document-aware chunking: each episode = one document.
-    # The 75/25 adapt/eval split means eval starts at position
-    # int(seq_len * 0.75).  Documents must be long enough that the
-    # eval window contains real tokens, otherwise cross-entropy on
-    # all-padding (-100) labels produces NaN.
-    adapt_len = int(config.seq_len * 0.75)
-    chunk_size = getattr(config, "adapt_every_n", 32)
-    adapt_len = (adapt_len // chunk_size) * chunk_size
-    # Require at least 128 real eval tokens (or 25% of eval window)
-    eval_window = config.seq_len - adapt_len
-    min_eval_tokens = max(128, eval_window // 4)
-    min_doc_len = adapt_len + min_eval_tokens
-    logger.info(
-        f"DocumentChunkedDataset: seq_len={config.seq_len}, "
-        f"adapt_len={adapt_len}, min_doc_len={min_doc_len}"
-    )
-
-    chunked = DocumentChunkedDataset(
-        hf_dataset=hf_ds,
-        tokenizer=tokenizer,
-        seq_len=config.seq_len,
-        min_len=min_doc_len,
-        text_column=text_column,
-    )
-
-    return DataLoader(
-        chunked,
-        batch_size=config.batch_size,
-        num_workers=0,  # streaming + tokenisation is fast enough in main
-    )
-
-
-def collate_episodes(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-    """
-    Default collate that stacks ``input_ids`` tensors.
-
-    Parameters
-    ----------
-    batch : list[dict]
-        Each dict has at least ``{"input_ids": LongTensor(seq_len)}``.
-
-    Returns
-    -------
-    dict with ``"input_ids"`` of shape ``(batch_size, seq_len)``.
-    """
-    return {"input_ids": torch.stack([b["input_ids"] for b in batch])}
-
-
-# ------------------------------------------------------------------ #
 # Synthetic episodic dataset (structured problem/solution sequences)   #
 # ------------------------------------------------------------------ #
 
@@ -404,7 +115,7 @@ class SyntheticEpisodicDataset(Dataset):
         self.vocab_size = vocab_size
 
         rng = torch.Generator().manual_seed(seed)
-        self.data: list[dict[str, Any]] = []
+        self.data: list[torch.Tensor] = []
 
         # Pre-compute problem span boundaries (same for all episodes)
         tokens_per_problem = seq_len // num_problems
@@ -448,94 +159,89 @@ def collate_episodic(batch: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ #
-# Real episodic dataset (multi-task QA from HuggingFace)               #
+# Multi-domain episodic dataset (Phase 1)                              #
 # ------------------------------------------------------------------ #
 
-class RealEpisodicDataset(Dataset):
+class MultiDomainEpisodeDataset(Dataset):
     """
-    Episodic dataset built from real QA datasets with context grouping.
+    Episodic dataset built from multiple reasoning domains with
+    context-grouped sampling.
 
-    Loads questions from multiple HuggingFace datasets, formats them as
-    ``Question: ...\\nAnswer: ...\\n\\n`` pairs, packs ``num_problems``
-    per episode into a single tokenised sequence, and records
-    ``problem_spans`` for per-problem loss computation.
+    Each episode packs ``num_problems`` related problems from the same
+    context group (exercise type, algorithm tag, shared passage, etc.)
+    into a single tokenised sequence.
 
-    **Context grouping** — all sources group QA pairs by shared
-    passage, article, or tight context so that all problems within an
-    episode share related content.  This gives a clean adaptation
-    signal: adapting on passage-based problems 1-5 genuinely helps
-    with eval problems 6-8 about the same passage.
-
-    Sources (all tightly grouped):
-      - ``rajpurkar/squad``       — RC grouped by article (~87 K)
-      - ``ehovy/race``            — RC grouped by passage (~88 K)
-      - ``stanfordnlp/coqa``      — conversational RC, ~15 Qs/story (~127 K)
-      - ``ucinlp/drop``           — discrete reasoning by section (~77 K)
-      - ``Samsoup/cosmos_qa``     — commonsense RC by blog post (~25 K)
-      - ``allenai/ropes``         — causal reasoning by background (~11 K)
-      - ``aps/super_glue`` multirc— multi-sentence RC by paragraph (~27 K)
-      - ``Rowan/hellaswag``       — commonsense by activity (~40 K)
-      - ``trivia_qa`` (rc)        — trivia by entity (~138 K)
-      - ``ChanceFocus/flare-finqa``— numerical reasoning over tables (~6 K)
-      - ``emozilla/quality``      — long-doc knowledge QA (~2.5 K)
-      - ``jluckyboyj/T0_Mixture_wiqa``— procedural/physical reasoning (~30 K)
-      - ``armanc/ScienceQA``       — science QA by paper abstract (~75 K)
-      - ``CodeQA`` (local)          — code comprehension by snippet (~190 K)
+    Domains:
+      - AMPS Khan Academy  — grouped by exercise type (693 types)
+      - MATH (Hendrycks)   — grouped by subject + difficulty level
+      - CodeForces-CoTs    — grouped by algorithm tag
+      - AR-LSAT            — grouped by shared scenario
+      - DROP               — grouped by shared passage
+      - ScienceQA          — grouped by skill category
 
     Falls back gracefully if a dataset is unavailable.
-    CodeQA requires a one-time preparation step — see
-    ``scripts/prepare_codeqa.py``.
     """
 
     SOURCES = [
-        # ── Reading comprehension (grouped by article) ──
+        # ── Math: AMPS Khan Academy ──
         {
-            "name": "rajpurkar/squad",
-            "config": None,
+            "name": "EleutherAI/amps",
+            "config": "khan_academy",
+            "domain": "math",
             "split": "train",
             "formatter": lambda ex: (
-                f"Based on: \"{ex['context'][:400]}\"\n{ex['question']}",
-                ex["answers"]["text"][0]
-                if ex["answers"].get("text")
-                else "",
+                ex.get("problem", ex.get("question", "")),
+                ex.get("solution", ex.get("answer", "")),
             ),
-            "grouper": lambda ex: ex.get("title", ""),
+            "grouper": lambda ex: ex.get("exercise_type", ex.get("type", "math")),
         },
-        # ── Reading comprehension (grouped by passage) ──
+        # ── Math (hard): MATH (Hendrycks) ──
         {
-            "name": "ehovy/race",
-            "config": "all",
+            "name": "hendrycks/competition_math",
+            "config": None,
+            "domain": "math_hard",
             "split": "train",
             "formatter": lambda ex: (
-                f"Based on: \"{ex['article'][:400]}\"\n{ex['question']}",
-                ex["options"][
-                    ["A", "B", "C", "D"].index(ex["answer"])
-                ]
-                if ex["answer"] in "ABCD"
-                and ["A", "B", "C", "D"].index(ex["answer"]) < len(ex["options"])
-                else ex["options"][0],
+                ex.get("problem", ""),
+                ex.get("solution", ""),
             ),
-            "grouper": lambda ex: ex.get("article", "")[:200],
+            "grouper": lambda ex: f"{ex.get('type', 'unknown')}_L{ex.get('level', '?')}",
         },
-        # ── Conversational RC (~15 Qs per story, exploded) ──
+        # ── Code: CodeForces-CoTs ──
         {
-            "name": "stanfordnlp/coqa",
+            "name": "open-r1/codeforces-cots",
             "config": None,
+            "domain": "code",
             "split": "train",
-            "exploder": lambda ex: [
-                (
-                    f"Based on: \"{ex['story'][:400]}\"\n{ex['questions'][i]}",
-                    ex["answers"]["input_text"][i],
-                )
-                for i in range(len(ex["questions"]))
-                if ex["answers"]["input_text"][i]
-            ],
-            "grouper": lambda ex: ex.get("story", "")[:200],
+            "formatter": lambda ex: (
+                ex.get("problem", ex.get("question", "")),
+                ex.get("solution", ex.get("answer", "")),
+            ),
+            # Group by algorithm tag if available, else by difficulty
+            "grouper": lambda ex: (
+                ex.get("tags", [None])[0]
+                if isinstance(ex.get("tags"), list) and ex.get("tags")
+                else ex.get("difficulty", "unknown")
+            ),
         },
-        # ── Discrete reasoning (grouped by section) ──
+        # ── Logic: AR-LSAT ──
+        {
+            "name": "nguha/legalbench",
+            "config": None,
+            "domain": "logic",
+            "split": "train",
+            "task_filter": "rule_qa",  # AR-LSAT style analytical reasoning
+            "formatter": lambda ex: (
+                ex.get("text", ex.get("question", "")),
+                ex.get("answer", ex.get("label", "")),
+            ),
+            "grouper": lambda ex: ex.get("text", "")[:200],
+        },
+        # ── Reading: DROP ──
         {
             "name": "ucinlp/drop",
             "config": None,
+            "domain": "reading",
             "split": "train",
             "formatter": lambda ex: (
                 f"Based on: \"{ex['passage'][:400]}\"\n{ex['question']}",
@@ -544,172 +250,61 @@ class RealEpisodicDataset(Dataset):
                 and ex["answers_spans"].get("spans")
                 else "",
             ),
-            "grouper": lambda ex: ex.get("section_id", ""),
+            "grouper": lambda ex: ex.get("section_id", ex.get("passage", "")[:200]),
         },
-        # ── Commonsense RC (grouped by blog post) ──
+        # ── Science: ScienceQA ──
         {
-            "name": "Samsoup/cosmos_qa",
+            "name": "derek-thomas/ScienceQA",
             "config": None,
-            "split": "train",
-            "formatter": lambda ex: (
-                f"Based on: \"{ex['context'][:400]}\"\n{ex['question']}",
-                ex[f"answer{ex['label']}"]
-                if isinstance(ex.get("label"), int)
-                and 0 <= ex["label"] <= 3
-                else ex.get("answer0", ""),
-            ),
-            "grouper": lambda ex: ex.get("context", "")[:200],
-        },
-        # ── Causal / scientific reasoning (grouped by background) ──
-        {
-            "name": "allenai/ropes",
-            "config": None,
+            "domain": "science",
             "split": "train",
             "formatter": lambda ex: (
                 (
-                    f"Background: {ex['background'][:300]}\n"
-                    f"Situation: {ex['situation'][:200]}\n"
-                    f"{ex['question']}"
+                    (f"Context: {ex['hint']}\n" if ex.get("hint") else "")
+                    + ex.get("question", "")
                 ),
-                ex["answers"]["text"][0]
-                if ex.get("answers")
-                and ex["answers"].get("text")
-                else "",
-            ),
-            "grouper": lambda ex: ex.get("background", "")[:200],
-        },
-        # ── Multi-sentence RC (grouped by paragraph, correct only) ──
-        {
-            "name": "aps/super_glue",
-            "config": "multirc",
-            "split": "train",
-            "filter": lambda ex: ex.get("label", 0) == 1,
-            "formatter": lambda ex: (
-                f"Based on: \"{ex['paragraph'][:400]}\"\n{ex['question']}",
-                ex["answer"],
-            ),
-            "grouper": lambda ex: ex["idx"]["paragraph"],
-        },
-        # ── Commonsense completion (grouped by activity) ──
-        {
-            "name": "Rowan/hellaswag",
-            "config": None,
-            "split": "train",
-            "formatter": lambda ex: (
-                ex["ctx"],
-                ex["endings"][int(ex["label"])]
-                if str(ex["label"]).isdigit()
-                else ex["endings"][0],
-            ),
-            "grouper": lambda ex: ex.get("activity_label", ""),
-        },
-        # ── Trivia / factual recall (grouped by entity) ──
-        {
-            "name": "trivia_qa",
-            "config": "rc",
-            "split": "train",
-            "formatter": lambda ex: (
-                ex["question"],
-                ex["answer"]["value"]
-                if ex["answer"].get("value")
-                else (
-                    ex["answer"]["aliases"][0]
-                    if ex["answer"].get("aliases")
+                (
+                    ex["choices"][ex["answer"]]
+                    if isinstance(ex.get("answer"), int)
+                    and 0 <= ex["answer"] < len(ex.get("choices", []))
                     else ""
                 ),
             ),
-            "grouper": lambda ex: (
-                ex["entity_pages"]["title"][0]
-                if ex.get("entity_pages")
-                and ex["entity_pages"].get("title")
-                else ""
-            ),
-        },
-        # ── Numerical reasoning over tables (grouped by context) ──
-        {
-            "name": "ChanceFocus/flare-finqa",
-            "config": None,
-            "split": "train",
-            "formatter": lambda ex: (
-                # query already contains context+table+question
-                ex.get("query", ""),
-                str(ex.get("answer", "")),
-            ),
-            # Group by first 200 chars of query (shared financial
-            # report context across Qs about the same table)
-            "grouper": lambda ex: ex.get("query", "")[:200],
-        },
-        # ── Long-document knowledge QA (grouped by article) ──
-        {
-            "name": "emozilla/quality",
-            "config": None,
-            "split": "train",
-            "formatter": lambda ex: (
-                f"Based on: \"{ex['article'][:400]}\"\n{ex['question']}",
-                ex["options"][ex["answer"]]
-                if isinstance(ex.get("answer"), int)
-                and 0 <= ex["answer"] < len(ex.get("options", []))
-                else ex.get("options", [""])[0],
-            ),
-            "grouper": lambda ex: ex.get("article", "")[:200],
-        },
-        # ── Procedural / physical reasoning (grouped by process) ──
-        {
-            "name": "jluckyboyj/T0_Mixture_wiqa",
-            "config": None,
-            "split": "train",
-            "formatter": lambda ex: (
-                # User message has "Process:\n...\nPerturbation hypothesis:\n..."
-                ex["messages"][0]["content"]
-                if ex.get("messages") and len(ex["messages"]) >= 2
-                else "",
-                # Assistant message has "yes" or "no"
-                ex["messages"][1]["content"]
-                if ex.get("messages") and len(ex["messages"]) >= 2
-                else "",
-            ),
-            # Group by the process steps (text before
-            # "Perturbation hypothesis")
-            "grouper": lambda ex: (
-                ex["messages"][0]["content"].split(
-                    "Perturbation hypothesis"
-                )[0][:200]
-                if ex.get("messages") and ex["messages"][0].get("content")
-                else ""
-            ),
-        },
-        # ── Science QA (grouped by paper abstract) ──
-        {
-            "name": "armanc/ScienceQA",
-            "config": None,
-            "split": "train",
-            "formatter": lambda ex: (
-                f"Based on: \"{ex['Context'][:400]}\"\n{ex['Question']}",
-                ex.get("Answer", ""),
-            ),
-            "grouper": lambda ex: ex.get("Context", "")[:200],
-        },
-        # ── Code comprehension (grouped by code snippet) ──
-        # Requires one-time prep: python scripts/prepare_codeqa.py
-        {
-            "name": "CodeQA (Liu & Wan, EMNLP 2021)",
-            "local_path": "data/codeqa",
-            "formatter": lambda ex: (
-                f"Code:\n{ex['code'][:400]}\n{ex['question']}",
-                ex.get("answer", ""),
-            ),
-            "grouper": lambda ex: ex.get("code", "")[:200],
+            "grouper": lambda ex: ex.get("category", ex.get("subject", "science")),
         },
     ]
 
-    # Minimum group size — groups smaller than this are merged into
-    # an ungrouped fallback bucket for that source.
+    # Also try local datasets with pre-generated CoT traces
+    LOCAL_SOURCES = [
+        {
+            "name": "AR-LSAT (local, CoT-enriched)",
+            "local_path": "data/ar_lsat_cot.json",
+            "domain": "logic",
+            "formatter": lambda ex: (
+                ex.get("problem", ex.get("question", "")),
+                ex.get("solution", ex.get("answer", "")),
+            ),
+            "grouper": lambda ex: ex.get("scenario_id", ex.get("problem", "")[:200]),
+        },
+        {
+            "name": "DROP (local, CoT-enriched)",
+            "local_path": "data/drop_cot.json",
+            "domain": "reading",
+            "formatter": lambda ex: (
+                f"Based on: \"{ex.get('passage', '')[:400]}\"\n{ex.get('question', '')}",
+                ex.get("solution", ex.get("answer", "")),
+            ),
+            "grouper": lambda ex: ex.get("passage", "")[:200],
+        },
+    ]
+
+    # Minimum group size — groups smaller than this are merged
     MIN_GROUP_SIZE = 4
 
     def __init__(
         self,
         tokenizer,
-        num_episodes: int = 30000,
+        num_episodes: int = 50000,
         seq_len: int = 2048,
         num_problems: int = 8,
     ):
@@ -719,45 +314,35 @@ class RealEpisodicDataset(Dataset):
         self.seq_len = seq_len
         self.num_problems = num_problems
 
-        # Two-level structure: source_groups[i] is a list of context
-        # groups for source i.  Each context group is a list of
-        # (question, answer) pairs that share related context.
-        self.source_groups: list[list[list[tuple[str, str]]]] = []
+        # domain_groups[domain_name] = list of context groups
+        # Each context group is a list of (problem, solution) pairs
+        self.domain_groups: dict[str, list[list[tuple[str, str]]]] = {}
         self._load_sources()
 
-        if not self.source_groups:
+        if not self.domain_groups:
             raise RuntimeError(
                 "No QA pairs loaded. Check network connectivity and "
                 "dataset availability."
             )
 
-        total_groups = sum(len(sg) for sg in self.source_groups)
+        total_groups = sum(len(gs) for gs in self.domain_groups.values())
         total_pairs = sum(
-            sum(len(g) for g in sg) for sg in self.source_groups
+            sum(len(g) for g in gs) for gs in self.domain_groups.values()
         )
         logger.info(
-            f"Loaded {total_pairs} QA pairs in {total_groups} context "
-            f"groups across {len(self.source_groups)} sources for "
-            f"Phase 2 (context-grouped sampling)"
+            f"Loaded {total_pairs} problem-solution pairs in "
+            f"{total_groups} context groups across "
+            f"{len(self.domain_groups)} domains for Phase 1"
         )
+        for domain, groups in self.domain_groups.items():
+            n_pairs = sum(len(g) for g in groups)
+            logger.info(
+                f"  {domain}: {n_pairs} pairs ({len(groups)} groups)"
+            )
 
     def _load_sources(self):
-        """Load QA pairs into per-source context groups.
-
-        For sources with a ``grouper`` function, QA pairs are split
-        into context groups (e.g. by article title, section, or
-        passage).  Groups smaller than ``MIN_GROUP_SIZE`` are merged
-        into a fallback group for that source.
-
-        Special source keys:
-        - ``exploder``: function that takes a row and returns a list of
-          ``(question, answer)`` pairs (for multi-Q-per-row datasets
-          like CoQA).
-        - ``filter``: predicate applied to each row before formatting
-          (e.g. MultiRC label==1).
-        - ``trust_remote_code``: passed to ``load_dataset``.
-        """
-        from datasets import load_dataset, load_from_disk
+        """Load QA pairs from all available sources."""
+        from datasets import load_dataset
 
         loaded: list[str] = []
         failed: list[str] = []
@@ -765,72 +350,40 @@ class RealEpisodicDataset(Dataset):
         for src in self.SOURCES:
             try:
                 logger.info(f"Loading {src['name']}...")
+                load_kwargs: dict[str, Any] = {}
+                if src.get("config"):
+                    load_kwargs["name"] = src["config"]
+                if src.get("trust_remote_code"):
+                    load_kwargs["trust_remote_code"] = True
 
-                if src.get("local_path"):
-                    # Local dataset (e.g. CodeQA from Google Drive)
-                    local_path = src["local_path"]
-                    if not os.path.isabs(local_path):
-                        # Resolve relative to project root
-                        project_root = os.path.dirname(
-                            os.path.dirname(os.path.dirname(__file__))
-                        )
-                        local_path = os.path.join(project_root, local_path)
-                    if not os.path.exists(local_path):
-                        logger.warning(
-                            f"  → {src['name']}: not found at {local_path}"
-                        )
-                        logger.warning(
-                            "    Run: python scripts/prepare_codeqa.py --help"
-                        )
-                        continue
-                    ds = load_from_disk(local_path)
-                else:
-                    load_kwargs: dict[str, Any] = {}
-                    if src.get("trust_remote_code"):
-                        load_kwargs["trust_remote_code"] = True
-                    ds = load_dataset(
-                        src["name"],
-                        src.get("config"),
-                        split=src["split"],
-                        **load_kwargs,
-                    )
+                ds = load_dataset(
+                    src["name"],
+                    split=src["split"],
+                    **load_kwargs,
+                )
 
+                domain = src["domain"]
+                formatter = src["formatter"]
                 grouper = src.get("grouper")
-                exploder = src.get("exploder")
-                row_filter = src.get("filter")
-                formatter = src.get("formatter")
 
                 groups_dict: dict[str, list[tuple[str, str]]] = {}
-
                 for example in ds:
                     try:
-                        # Optional row-level filter (e.g. MultiRC label==1)
-                        if row_filter and not row_filter(example):
+                        q, a = formatter(example)
+                        if not q or not a:
                             continue
 
-                        # Get group key (convert non-string keys)
                         key = str(grouper(example)) if grouper else "_all"
                         if not key:
                             continue
 
-                        # Extract QA pairs — either explode or format
-                        if exploder:
-                            pairs = exploder(example)
-                            for q, a in pairs:
-                                if q and a:
-                                    groups_dict.setdefault(key, []).append(
-                                        (q.strip(), a.strip())
-                                    )
-                        elif formatter:
-                            q, a = formatter(example)
-                            if q and a:
-                                groups_dict.setdefault(key, []).append(
-                                    (q.strip(), a.strip())
-                                )
+                        groups_dict.setdefault(key, []).append(
+                            (q.strip(), a.strip())
+                        )
                     except (KeyError, IndexError, TypeError, ValueError):
                         continue
 
-                # Separate large groups from small ones
+                # Separate large and small groups
                 groups: list[list[tuple[str, str]]] = []
                 fallback: list[tuple[str, str]] = []
                 for _key, pairs in groups_dict.items():
@@ -839,16 +392,17 @@ class RealEpisodicDataset(Dataset):
                     else:
                         fallback.extend(pairs)
 
-                # Merge small groups into a fallback group
                 if len(fallback) >= self.MIN_GROUP_SIZE:
                     groups.append(fallback)
 
                 if groups:
-                    self.source_groups.append(groups)
-                    total_pairs = sum(len(g) for g in groups)
+                    if domain not in self.domain_groups:
+                        self.domain_groups[domain] = []
+                    self.domain_groups[domain].extend(groups)
+                    total = sum(len(g) for g in groups)
                     logger.info(
-                        f"  → {src['name']}: {total_pairs} pairs "
-                        f"({len(groups)} context groups)"
+                        f"  → {src['name']}: {total} pairs "
+                        f"({len(groups)} groups) [domain={domain}]"
                     )
                     loaded.append(src["name"])
                 else:
@@ -857,17 +411,75 @@ class RealEpisodicDataset(Dataset):
                     )
                     failed.append(src["name"])
             except Exception as e:
-                logger.warning(
-                    f"  → {src['name']}: failed ({e}), skipping"
-                )
+                logger.warning(f"  → {src['name']}: failed ({e}), skipping")
                 failed.append(src["name"])
 
-        # ── Summary ──
-        n_total = len(self.SOURCES)
+        # Try local CoT-enriched datasets
+        for src in self.LOCAL_SOURCES:
+            try:
+                local_path = src["local_path"]
+                if not os.path.isabs(local_path):
+                    project_root = os.path.dirname(
+                        os.path.dirname(os.path.dirname(__file__))
+                    )
+                    local_path = os.path.join(project_root, local_path)
+
+                if not os.path.exists(local_path):
+                    logger.info(
+                        f"  → {src['name']}: not found at {local_path} (optional)"
+                    )
+                    continue
+
+                logger.info(f"Loading local: {src['name']}...")
+                with open(local_path, "r") as f:
+                    data = json.load(f)
+
+                domain = src["domain"]
+                formatter = src["formatter"]
+                grouper = src.get("grouper")
+
+                groups_dict: dict[str, list[tuple[str, str]]] = {}
+                for example in data:
+                    try:
+                        q, a = formatter(example)
+                        if not q or not a:
+                            continue
+                        key = str(grouper(example)) if grouper else "_all"
+                        groups_dict.setdefault(key, []).append(
+                            (q.strip(), a.strip())
+                        )
+                    except (KeyError, IndexError, TypeError, ValueError):
+                        continue
+
+                groups = []
+                fallback = []
+                for _key, pairs in groups_dict.items():
+                    if len(pairs) >= self.MIN_GROUP_SIZE:
+                        groups.append(pairs)
+                    else:
+                        fallback.extend(pairs)
+                if len(fallback) >= self.MIN_GROUP_SIZE:
+                    groups.append(fallback)
+
+                if groups:
+                    if domain not in self.domain_groups:
+                        self.domain_groups[domain] = []
+                    self.domain_groups[domain].extend(groups)
+                    total = sum(len(g) for g in groups)
+                    logger.info(
+                        f"  → {src['name']}: {total} pairs "
+                        f"({len(groups)} groups) [domain={domain}]"
+                    )
+                    loaded.append(src["name"])
+            except Exception as e:
+                logger.warning(f"  → {src['name']}: failed ({e}), skipping")
+
+        # Summary
+        n_total = len(self.SOURCES) + len(self.LOCAL_SOURCES)
         n_ok = len(loaded)
         n_fail = len(failed)
         logger.info("")
-        logger.info(f"Phase 2 dataset summary: {n_ok}/{n_total} loaded, {n_fail} failed")
+        logger.info(f"Phase 1 dataset summary: {n_ok}/{n_total} loaded, {n_fail} failed")
         if loaded:
             logger.info(f"  ✓ Loaded: {', '.join(loaded)}")
         if failed:
@@ -878,31 +490,23 @@ class RealEpisodicDataset(Dataset):
         return self.num_episodes
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        """Build one episode: num_problems QA pairs packed densely.
+        """Build one episode: num_problems related problems packed densely.
 
-        Problems are packed back-to-back with no fixed slot boundaries.
-        Each problem is tokenised as::
+        Two-level sampling:
+        1. Pick a domain uniformly (balances domain representation)
+        2. Pick a context group within that domain
+        3. Draw all problems from that group
 
-            Question: {q}\\nAnswer: {a}\\n\\n
-
-        ``problem_spans`` records the actual ``(sol_start, sol_end)``
-        positions of each answer in token space, so the loss is
-        computed on exactly the answer tokens (no padding waste).
-
-        Remaining space at the end is padded with ``pad_id`` and
-        labelled ``-100``.
+        Format: plain text, problem + step-by-step solution.
+        No chat template, no <think> tags.
         """
         rng = random.Random(idx)
         pad_id = self.tokenizer.eos_token_id or 0
 
-        # Two-level context-grouped sampling:
-        # 1. Pick a source uniformly (preserves source-level balance)
-        # 2. Pick a context group within that source
-        # 3. Draw all problems from that group
-        # This ensures adapt problems (1-5) share context with eval
-        # problems (6-8), so adaptation genuinely helps.
-        source_groups = rng.choice(self.source_groups)
-        group = rng.choice(source_groups)
+        # Pick a domain uniformly
+        domain = rng.choice(list(self.domain_groups.keys()))
+        domain_grps = self.domain_groups[domain]
+        group = rng.choice(domain_grps)
         selected = [rng.choice(group) for _ in range(self.num_problems)]
 
         all_tokens: list[int] = []
@@ -911,28 +515,24 @@ class RealEpisodicDataset(Dataset):
 
         for q, a in selected:
             q_tokens = self.tokenizer.encode(
-                f"Question: {q}\nAnswer: ", add_special_tokens=False,
+                f"Problem: {q}\nSolution: ", add_special_tokens=False,
             )
             a_tokens = self.tokenizer.encode(
                 f"{a}\n\n", add_special_tokens=False,
             )
 
             sol_start = len(all_tokens) + len(q_tokens)
-            # Ensure sol_start >= 1 (we need logits at sol_start - 1)
             sol_start = max(sol_start, 1)
             sol_end = sol_start + len(a_tokens)
 
-            # Stop if this problem would overflow seq_len
             if sol_end > self.seq_len:
-                # Try to fit a truncated version
                 remaining = self.seq_len - len(all_tokens)
                 if remaining > len(q_tokens) + 1:
-                    # Truncate answer to fit
                     a_budget = remaining - len(q_tokens)
                     a_tokens = a_tokens[:a_budget]
                     sol_end = sol_start + len(a_tokens)
                 else:
-                    break  # no room for even the question
+                    break
 
             all_tokens.extend(q_tokens)
             all_tokens.extend(a_tokens)
@@ -948,7 +548,6 @@ class RealEpisodicDataset(Dataset):
             all_tokens.extend([pad_id] * pad_len)
             all_labels.extend([-100] * pad_len)
 
-        # Safety truncate (shouldn't happen but defensive)
         all_tokens = all_tokens[: self.seq_len]
         all_labels = all_labels[: self.seq_len]
 
@@ -956,22 +555,105 @@ class RealEpisodicDataset(Dataset):
             "input_ids": torch.tensor(all_tokens, dtype=torch.long),
             "labels": torch.tensor(all_labels, dtype=torch.long),
             "problem_spans": problem_spans,
+            "domain": domain,
         }
 
 
-def build_phase2_dataloader(
+# ------------------------------------------------------------------ #
+# Domain text dataset (Phase 2 consolidation)                          #
+# ------------------------------------------------------------------ #
+
+class SyntheticDomainDataset(Dataset):
+    """
+    Domain-specific synthetic data for Phase 2 consolidation training.
+
+    Each domain produces token sequences with a characteristic
+    statistical profile.
+    """
+
+    DOMAINS = [
+        "math", "math_hard", "code", "logic", "reading", "science",
+    ]
+
+    def __init__(
+        self,
+        domain: str,
+        num_episodes: int = 64,
+        seq_len: int = 256,
+        vocab_size: int = 1000,
+        seed: int = 42,
+    ):
+        super().__init__()
+        self.domain = domain
+        self.num_episodes = num_episodes
+        self.seq_len = seq_len
+        self.vocab_size = vocab_size
+
+        if domain in self.DOMAINS:
+            domain_offset = self.DOMAINS.index(domain)
+        else:
+            domain_offset = hash(domain) % 100
+
+        rng = torch.Generator().manual_seed(seed + domain_offset * 1000)
+        num_domains = max(len(self.DOMAINS), domain_offset + 1)
+        slice_size = vocab_size // num_domains
+        domain_start = domain_offset * slice_size
+        domain_end = min(domain_start + slice_size, vocab_size)
+        domain_end = max(domain_end, domain_start + 10)
+        domain_end = min(domain_end, vocab_size)
+
+        self.data: list[torch.Tensor] = []
+        num_domain_tokens = int(seq_len * 0.7)
+        num_random_tokens = seq_len - num_domain_tokens
+
+        for _ in range(num_episodes):
+            domain_tokens = torch.randint(
+                domain_start, domain_end,
+                (num_domain_tokens,), generator=rng,
+            )
+            random_tokens = torch.randint(
+                0, vocab_size,
+                (num_random_tokens,), generator=rng,
+            )
+            tokens = torch.cat([domain_tokens, random_tokens])
+            perm = torch.randperm(seq_len, generator=rng)
+            tokens = tokens[perm]
+            self.data.append(tokens)
+
+    def __len__(self) -> int:
+        return self.num_episodes
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        return {"input_ids": self.data[idx]}
+
+
+# ------------------------------------------------------------------ #
+# Domain names                                                         #
+# ------------------------------------------------------------------ #
+
+DOMAINS: list[str] = [
+    "math", "math_hard", "code", "logic", "reading", "science",
+]
+"""Default domain names for Phase 2 consolidation training."""
+
+
+# ------------------------------------------------------------------ #
+# Dataloader builders                                                  #
+# ------------------------------------------------------------------ #
+
+def build_phase1_dataloader(
     config,
     tokenizer=None,
     *,
     synthetic: bool = False,
 ) -> DataLoader:
     """
-    Build a ``DataLoader`` for Phase 2 episodic training.
+    Build a ``DataLoader`` for Phase 1 episodic training.
 
     Parameters
     ----------
     config : NATConfig
-        Must have ``seq_len``, ``batch_size``, ``num_episodes_p2``,
+        Must have ``seq_len``, ``batch_size``, ``num_episodes_p1``,
         ``num_problems_per_episode``.
     tokenizer : optional
         HuggingFace tokenizer.  Required unless ``synthetic=True``.
@@ -983,25 +665,24 @@ def build_phase2_dataloader(
     DataLoader
     """
     num_problems = getattr(config, "num_problems_per_episode", 8)
-    p2_batch = getattr(config, "batch_size_p2", config.batch_size)
 
     if synthetic:
         dataset = SyntheticEpisodicDataset(
-            num_episodes=getattr(config, "num_episodes_p2", 1000),
+            num_episodes=getattr(config, "num_episodes_p1", 1000),
             seq_len=config.seq_len,
             num_problems=num_problems,
             vocab_size=getattr(config, "vocab_size", 1000),
         )
         return DataLoader(
             dataset,
-            batch_size=p2_batch,
+            batch_size=config.batch_size,
             shuffle=True,
             drop_last=True,
             num_workers=0,
             collate_fn=collate_episodic,
         )
 
-    # ---- Real episodic data ----
+    # ---- Real multi-domain episodic data ----
     assert tokenizer is not None, (
         "tokenizer is required for non-synthetic data. "
         "Pass synthetic=True for testing."
@@ -1014,18 +695,218 @@ def build_phase2_dataloader(
             "Install HuggingFace datasets: pip install datasets"
         ) from exc
 
-    logger.info("Loading real episodic data (multi-task QA)...")
+    logger.info("Loading real episodic data (multi-domain)...")
 
-    dataset = RealEpisodicDataset(
+    dataset = MultiDomainEpisodeDataset(
         tokenizer=tokenizer,
-        num_episodes=getattr(config, "num_episodes_p2", 30000),
+        num_episodes=getattr(config, "num_episodes_p1", 50000),
         seq_len=config.seq_len,
         num_problems=num_problems,
     )
 
     return DataLoader(
         dataset,
-        batch_size=p2_batch,
+        batch_size=config.batch_size,
         num_workers=0,
         collate_fn=collate_episodic,
     )
+
+
+def build_domain_dataloader(
+    config,
+    domain: str,
+    tokenizer=None,
+    *,
+    synthetic: bool = True,
+) -> DataLoader | None:
+    """
+    Build a ``DataLoader`` for a single domain (Phase 2 consolidation).
+
+    Parameters
+    ----------
+    config : NATConfig
+    domain : str
+    tokenizer : optional
+    synthetic : bool
+        If ``True``, use ``SyntheticDomainDataset``.
+
+    Returns
+    -------
+    DataLoader or None
+    """
+    if synthetic:
+        sessions_per_domain = getattr(config, "sessions_per_domain_p2", 20)
+        dataset = SyntheticDomainDataset(
+            domain=domain,
+            num_episodes=max(sessions_per_domain * 4, 64),
+            seq_len=config.seq_len,
+            vocab_size=getattr(config, "vocab_size", 1000),
+        )
+        return DataLoader(
+            dataset,
+            batch_size=config.batch_size,
+            shuffle=True,
+            drop_last=True,
+            num_workers=0,
+        )
+
+    # Real domain data — load from same sources as Phase 1
+    assert tokenizer is not None, (
+        "tokenizer is required for non-synthetic data."
+    )
+
+    from datasets import load_dataset
+
+    # Map domain names to source datasets
+    DOMAIN_SOURCE_MAP: dict[str, list[dict]] = {
+        "math": [
+            {
+                "name": "EleutherAI/amps",
+                "config": "khan_academy",
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"Problem: {ex.get('problem', ex.get('question', ''))}\n"
+                    f"Solution: {ex.get('solution', ex.get('answer', ''))}\n\n"
+                ),
+            },
+        ],
+        "math_hard": [
+            {
+                "name": "hendrycks/competition_math",
+                "config": None,
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"Problem: {ex.get('problem', '')}\n"
+                    f"Solution: {ex.get('solution', '')}\n\n"
+                ),
+            },
+        ],
+        "code": [
+            {
+                "name": "open-r1/codeforces-cots",
+                "config": None,
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"Problem: {ex.get('problem', ex.get('question', ''))}\n"
+                    f"Solution: {ex.get('solution', ex.get('answer', ''))}\n\n"
+                ),
+            },
+        ],
+        "logic": [
+            {
+                "name": "nguha/legalbench",
+                "config": None,
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"Problem: {ex.get('text', ex.get('question', ''))}\n"
+                    f"Answer: {ex.get('answer', ex.get('label', ''))}\n\n"
+                ),
+            },
+        ],
+        "reading": [
+            {
+                "name": "ucinlp/drop",
+                "config": None,
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"Passage: {ex['passage'][:400]}\n"
+                    f"Question: {ex['question']}\n"
+                    f"Answer: {ex['answers_spans']['spans'][0] if ex.get('answers_spans') and ex['answers_spans'].get('spans') else ''}\n\n"
+                ),
+            },
+        ],
+        "science": [
+            {
+                "name": "derek-thomas/ScienceQA",
+                "config": None,
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"Question: {ex.get('question', '')}\n"
+                    f"Answer: {ex['choices'][ex['answer']] if isinstance(ex.get('answer'), int) and 0 <= ex['answer'] < len(ex.get('choices', [])) else ''}\n\n"
+                ),
+            },
+        ],
+    }
+
+    if domain not in DOMAIN_SOURCE_MAP:
+        logger.warning(f"Unknown domain '{domain}' for real data")
+        return None
+
+    sources = DOMAIN_SOURCE_MAP[domain]
+    sessions_per_domain = getattr(config, "sessions_per_domain_p2", 20)
+    num_episodes = max(sessions_per_domain * 4, 64)
+
+    # Load from HuggingFace and tokenize into chunks
+    from nat.training.phase2_consolidation import DomainTextDataset
+
+    for src in sources:
+        try:
+            logger.info(f"Loading domain '{domain}' source: {src['name']}...")
+            load_kwargs: dict[str, Any] = {"split": src["split"]}
+            if src["config"]:
+                load_kwargs["name"] = src["config"]
+
+            hf_ds = load_dataset(src["name"], **load_kwargs)
+
+            domain_dataset = DomainTextDataset(
+                hf_dataset=hf_ds,
+                tokenizer=tokenizer,
+                formatter=src["formatter"],
+                seq_len=config.seq_len,
+                num_episodes=num_episodes,
+                streaming=False,
+            )
+
+            return DataLoader(
+                domain_dataset,
+                batch_size=config.batch_size,
+                shuffle=True,
+                drop_last=True,
+                num_workers=0,
+            )
+        except Exception as e:
+            logger.warning(f"  → {src['name']}: failed ({e}), skipping")
+
+    logger.warning(f"No sources loaded for domain '{domain}'")
+    return None
+
+
+def build_domain_sequence(
+    config,
+    domains: list[str] | None = None,
+) -> list[str]:
+    """
+    Build a domain sequence for one Phase 2 consolidation run.
+
+    Default structure::
+
+        D1 × N  →  D2 × N  →  D1 × K
+
+    Parameters
+    ----------
+    config : NATConfig
+    domains : list[str], optional
+
+    Returns
+    -------
+    list[str]
+    """
+    if domains is None:
+        domains = DOMAINS
+
+    sessions_per_domain = getattr(config, "sessions_per_domain_p2", 20)
+    forgetting_sessions = getattr(config, "forgetting_test_sessions_p2", 5)
+
+    d1, d2 = random.sample(domains, 2)
+
+    sequence: list[str] = (
+        [d1] * sessions_per_domain
+        + [d2] * sessions_per_domain
+        + [d1] * forgetting_sessions
+    )
+    return sequence
+
+
+def collate_episodes(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """Default collate that stacks ``input_ids`` tensors."""
+    return {"input_ids": torch.stack([b["input_ids"] for b in batch])}

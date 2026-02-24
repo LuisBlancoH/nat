@@ -1,5 +1,5 @@
 """
-Phase 3: Train consolidation dynamics.
+Phase 2: Train consolidation dynamics.
 
 What is trained
 ---------------
@@ -63,8 +63,8 @@ Usage
 -----
 ::
 
-    from nat.training.phase3_consolidation import train_phase3
-    train_phase3(model, config)
+    from nat.training.phase2_consolidation import train_phase2
+    train_phase2(model, config)
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-from nat.training.phase1_meta_learn import _save_checkpoint
+from nat.training.train_utils import save_checkpoint as _save_checkpoint
 
 try:
     from transformers import DynamicCache
@@ -100,7 +100,7 @@ DOMAINS: list[str] = [
     "math", "code", "reasoning", "text", "science",
     "knowledge", "commonsense", "trivia",
 ]
-"""Default domain names for Phase 3 training."""
+"""Default domain names for Phase 2 training."""
 
 
 # ------------------------------------------------------------------ #
@@ -109,7 +109,7 @@ DOMAINS: list[str] = [
 
 class SyntheticDomainDataset(Dataset):
     """
-    Domain-specific synthetic data for Phase 3 consolidation training.
+    Domain-specific synthetic data for Phase 2 consolidation training.
 
     Each domain produces token sequences with a characteristic
     statistical profile: 70 % of tokens are drawn from a
@@ -314,7 +314,7 @@ def build_domain_dataloader(
         (the domain should be excluded from training).
     """
     if synthetic:
-        sessions_per_domain = getattr(config, "sessions_per_domain_p3", 20)
+        sessions_per_domain = getattr(config, "sessions_per_domain_p2", 20)
         dataset = SyntheticDomainDataset(
             domain=domain,
             num_episodes=max(sessions_per_domain * 4, 64),
@@ -492,7 +492,7 @@ def build_domain_dataloader(
 
     sources = DOMAIN_SOURCES[domain]
     num_episodes = max(
-        getattr(config, "sessions_per_domain_p3", 20) * 4, 64
+        getattr(config, "sessions_per_domain_p2", 20) * 4, 64
     )
 
     # Load all sources for this domain, merge into one DomainTextDataset
@@ -577,14 +577,14 @@ def build_domain_sequence(
     domains: list[str] | None = None,
 ) -> list[str]:
     """
-    Build a domain sequence for one Phase 3 run.
+    Build a domain sequence for one Phase 2 run.
 
     Default structure::
 
         D1 × N  →  D2 × N  →  D1 × K
 
-    where ``N = sessions_per_domain_p3`` and
-    ``K = forgetting_test_sessions_p3``.
+    where ``N = sessions_per_domain_p2`` and
+    ``K = forgetting_test_sessions_p2``.
 
     Two domains are sampled randomly from the pool on each call.
 
@@ -602,8 +602,8 @@ def build_domain_sequence(
     if domains is None:
         domains = DOMAINS
 
-    sessions_per_domain = getattr(config, "sessions_per_domain_p3", 20)
-    forgetting_sessions = getattr(config, "forgetting_test_sessions_p3", 5)
+    sessions_per_domain = getattr(config, "sessions_per_domain_p2", 20)
+    forgetting_sessions = getattr(config, "forgetting_test_sessions_p2", 5)
 
     d1, d2 = random.sample(domains, 2)
 
@@ -779,7 +779,7 @@ def compute_consolidation_metrics(
 
 
 # ------------------------------------------------------------------ #
-# Single Phase 3 run (multi-session domain sequence)                   #
+# Single Phase 2 run (multi-session domain sequence)                   #
 # ------------------------------------------------------------------ #
 
 def train_one_run(
@@ -794,7 +794,7 @@ def train_one_run(
     available_domains: list[str] | None = None,
 ) -> dict[str, Any]:
     """
-    Execute one Phase 3 consolidation run.
+    Execute one Phase 2 consolidation run.
 
     Processes a full domain sequence (D1 × N → D2 × N → D1 × K),
     training the consolidation layer, β, and α along the way.
@@ -821,7 +821,7 @@ def train_one_run(
     """
     batch_size = config.batch_size
     device = torch.device(config.device)
-    sessions_per_domain = getattr(config, "sessions_per_domain_p3", 20)
+    sessions_per_domain = getattr(config, "sessions_per_domain_p2", 20)
     truncate_every = getattr(config, "p3_truncate_sessions", 4)
     chunk_size = config.adapt_every_n
     grad_clip = getattr(config, "grad_clip", 1.0)
@@ -980,10 +980,10 @@ def train_one_run(
 
 
 # ------------------------------------------------------------------ #
-# Full Phase 3 training loop                                           #
+# Full Phase 2 training loop                                           #
 # ------------------------------------------------------------------ #
 
-def train_phase3(
+def train_phase2(
     model,
     config,
     *,
@@ -991,15 +991,15 @@ def train_phase3(
     synthetic: bool = False,
 ) -> dict[str, Any]:
     """
-    Full Phase 3 consolidation training loop.
+    Full Phase 2 consolidation training loop.
 
     Parameters
     ----------
     model : NATModel
         Must have trained adaptive θ (from Phase 1-2).
     config : NATConfig
-        Key fields: ``lr_phase3``, ``num_runs_p3``,
-        ``sessions_per_domain_p3``, ``forgetting_test_sessions_p3``,
+        Key fields: ``lr_phase2``, ``num_runs_p2``,
+        ``sessions_per_domain_p2``, ``forgetting_test_sessions_p2``,
         ``p3_truncate_sessions``, ``beta``, ``session_reset_alpha``.
     use_wandb : bool
         Enable Weights & Biases logging.
@@ -1016,7 +1016,7 @@ def train_phase3(
     model.train()
 
     # ================================================================
-    # Freeze adaptive θ — only consolidation is trained in Phase 3
+    # Freeze adaptive θ — only consolidation is trained in Phase 2
     # ================================================================
     for param in model.adaptive_A.parameters():
         param.requires_grad = False
@@ -1060,7 +1060,7 @@ def train_phase3(
     # ================================================================
     # Optimizer
     # ================================================================
-    lr = float(getattr(config, "lr_phase3", 1e-4))
+    lr = float(getattr(config, "lr_phase2", 1e-4))
     optimizer = torch.optim.Adam(
         [
             {"params": model.consolidation.parameters(), "lr": lr},
@@ -1069,7 +1069,7 @@ def train_phase3(
         ],
     )
 
-    num_runs = getattr(config, "num_runs_p3", 100)
+    num_runs = getattr(config, "num_runs_p2", 100)
 
     # ================================================================
     # Build domain dataloaders
@@ -1090,11 +1090,11 @@ def train_phase3(
     available_domains = list(domain_dataloaders.keys())
     if len(available_domains) < 2:
         raise RuntimeError(
-            f"Phase 3 needs at least 2 domains but only got "
+            f"Phase 2 needs at least 2 domains but only got "
             f"{available_domains}. Check network / dataset availability."
         )
     logger.info(
-        f"Phase 3 active domains ({len(available_domains)}): "
+        f"Phase 2 active domains ({len(available_domains)}): "
         f"{available_domains}"
     )
 
@@ -1115,7 +1115,7 @@ def train_phase3(
                     project=config.wandb_project,
                     entity=getattr(config, "wandb_entity", None),
                     config=config.to_dict(),
-                    tags=["phase3"],
+                    tags=["phase2"],
                 )
                 if wandb.run:
                     logger.info(f"W&B run: {wandb.run.url}")
@@ -1131,11 +1131,11 @@ def train_phase3(
     log_every = getattr(config, "log_every", 10)
     save_every = getattr(config, "save_every", 50)
     save_path = str(
-        Path(getattr(config, "save_dir", "checkpoints")) / "phase3.pt"
+        Path(getattr(config, "save_dir", "checkpoints")) / "phase2.pt"
     )
 
     logger.info(
-        f"Phase 3 consolidation training — {num_runs} runs, "
+        f"Phase 2 consolidation training — {num_runs} runs, "
         f"lr={lr}, device={device}"
     )
 
@@ -1223,14 +1223,14 @@ def train_phase3(
 
         # ---- Periodic checkpoint ----
         if (run_idx + 1) % save_every == 0:
-            _save_phase3_checkpoint(
+            _save_phase2_checkpoint(
                 model, beta_logit, alpha_logit, save_path, run_idx + 1,
             )
 
     # ================================================================
     # Final save and cleanup
     # ================================================================
-    _save_phase3_checkpoint(
+    _save_phase2_checkpoint(
         model, beta_logit, alpha_logit, save_path, num_runs,
     )
 
@@ -1248,7 +1248,7 @@ def train_phase3(
 
     elapsed = time.time() - t0
     logger.info(
-        f"Phase 3 complete — {num_runs} runs in {elapsed:.0f}s, "
+        f"Phase 2 complete — {num_runs} runs in {elapsed:.0f}s, "
         f"final β={final_beta:.4f}, final α={final_alpha:.3f}, "
         f"best improvement={best_improvement:+.4f}"
     )
@@ -1266,14 +1266,14 @@ def train_phase3(
 # Checkpoint utilities                                                 #
 # ------------------------------------------------------------------ #
 
-def _save_phase3_checkpoint(
+def _save_phase2_checkpoint(
     model,
     beta_logit: nn.Parameter,
     alpha_logit: nn.Parameter,
     path: str | Path,
     run_idx: int,
 ) -> None:
-    """Save Phase 3 training state to disk."""
+    """Save Phase 2 training state to disk."""
     save_path = Path(path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -1289,15 +1289,15 @@ def _save_phase3_checkpoint(
         },
         save_path,
     )
-    logger.info(f"Phase 3 checkpoint saved → {save_path}  (run {run_idx})")
+    logger.info(f"Phase 2 checkpoint saved → {save_path}  (run {run_idx})")
 
 
-def load_phase3_checkpoint(
+def load_phase2_checkpoint(
     model,
     path: str,
 ) -> tuple[int, float, float]:
     """
-    Load Phase 3 checkpoint.
+    Load Phase 2 checkpoint.
 
     Restores consolidation, adaptive-A and adaptive-B state dicts.
 
@@ -1326,7 +1326,7 @@ def load_phase3_checkpoint(
     model.config.session_reset_alpha = alpha_val
 
     logger.info(
-        f"Phase 3 checkpoint loaded ← {path}  "
+        f"Phase 2 checkpoint loaded ← {path}  "
         f"(run {run_idx}, β={beta_val:.4f}, α={alpha_val:.3f})"
     )
     return run_idx, beta_val, alpha_val

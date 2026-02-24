@@ -57,6 +57,15 @@ class MockTransformer(nn.Module):
         self.lm_head = nn.Linear(d, vocab, bias=False)
         self.config = type("C", (), {"hidden_size": d})()
 
+    def forward(self, input_ids, use_cache=False, **kwargs):
+        hidden = self.embed_tokens(input_ids)
+        for layer in self.layers:
+            out = layer(hidden)
+            hidden = out[0] if isinstance(out, tuple) else out
+        hidden = self.norm(hidden)
+        logits = self.lm_head(hidden)
+        return type("Output", (), {"logits": logits})()
+
 
 @dataclass
 class MockConfig:

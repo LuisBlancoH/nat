@@ -1,27 +1,27 @@
 """
 NATModel — Full Nested Adaptive Transformer.
 
-Wraps a frozen pretrained transformer (Qwen2.5 / Llama-family) with two
-adaptive memory layers and one consolidation layer inserted between specific
-transformer layers.
+Wraps a frozen pretrained transformer (Qwen3 / Qwen2.5 / Llama-family)
+with two adaptive memory layers and one consolidation layer inserted
+between specific transformer layers using PyTorch forward hooks.
 
-The forward pass manually iterates through the base model's decoder layers
-so that adaptive / consolidation layers can be applied between them.
+The forward pass delegates to the base model's own forward method and
+uses hooks registered on specific decoder layers to inject adaptive /
+consolidation logic.  This avoids replicating model internals (QK-Norm,
+RoPE, GQA, KV-cache) and works across architectures.
 
 Supported base architectures
 -----------------------------
-- Qwen2 / Qwen2.5   (``model.model.layers``, ``model.model.embed_tokens``, etc.)
-- Llama / Llama-3.x  (same module structure)
-- Mistral            (same module structure)
+- Qwen3 / Qwen2 / Qwen2.5
+- Llama / Llama-3.x
+- Mistral
 
-All three share the ``LlamaForCausalLM``-style layout, so a single
-implementation covers them.
+All share the ``model.model.layers`` layout.
 """
 
 from __future__ import annotations
 
 import logging
-from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -37,45 +37,7 @@ from nat.model.utils import (
     log_device_memory,
 )
 
-try:
-    from transformers import DynamicCache
-except ImportError:
-    DynamicCache = None
-
 logger = logging.getLogger(__name__)
-
-
-# ------------------------------------------------------------------ #
-# Helper: build causal mask for manual layer-by-layer forward pass     #
-# ------------------------------------------------------------------ #
-
-def _make_causal_mask(
-    seq_len: int,
-    dtype: torch.dtype,
-    device: torch.device,
-    past_len: int = 0,
-) -> torch.Tensor:
-    """
-    Build a causal attention mask.
-
-    When ``past_len > 0`` (KV cache in use), the mask allows the current
-    chunk to attend to all cached positions (causal by construction since
-    they precede the current chunk) and applies standard causal masking
-    within the current chunk.
-
-    Returns shape ``(1, 1, seq_len, past_len + seq_len)`` with 0 for
-    attend and ``-inf`` for masked positions.
-    """
-    total_len = past_len + seq_len
-    # All cached positions are attendable (they are in the past).
-    mask = torch.zeros((seq_len, total_len), dtype=dtype, device=device)
-    # Apply causal masking within the current chunk.
-    causal_part = torch.triu(
-        torch.full((seq_len, seq_len), float("-inf"), dtype=dtype, device=device),
-        diagonal=1,
-    )
-    mask[:, past_len:] = causal_part
-    return mask.unsqueeze(0).unsqueeze(0)
 
 
 # ------------------------------------------------------------------ #
@@ -87,8 +49,8 @@ class NATModel(nn.Module):
     Nested Adaptive Transformer.
 
     Wraps a frozen pretrained causal LM with:
-      - Two ``AdaptiveMemoryLayer`` instances inserted after layers A and B.
-      - One ``ConsolidationLayer`` inserted after layer C.
+      - Two ``AdaptiveMemoryLayer`` instances hooked after layers A and B.
+      - One ``ConsolidationLayer`` hooked after layer C.
 
     Insertion points default to 1/3, 2/3, 5/6 of the total depth.
 
@@ -143,7 +105,7 @@ class NATModel(nn.Module):
             param.requires_grad = False
 
         # -------------------------------------------------------------- #
-        # Discover model internals                                         #
+        # Discover model internals (auto-detect d_model, num_layers)       #
         # -------------------------------------------------------------- #
         self._discover_base_model()
 
@@ -154,16 +116,16 @@ class NATModel(nn.Module):
             self.d_model,
             rank=config.rank,
             d_hidden=config.d_hidden,
-            lr_clamp=getattr(config, "lr_clamp", 0.1),
-            fast_weight_max_norm=getattr(config, "fast_weight_max_norm", 10.0),
+            lr_clamp=getattr(config, "lr_clamp", 0.05),
+            fast_weight_max_norm=getattr(config, "fast_weight_max_norm", 8.0),
         ).float()
 
         self.adaptive_B = AdaptiveMemoryLayer(
             self.d_model,
             rank=config.rank,
             d_hidden=config.d_hidden,
-            lr_clamp=getattr(config, "lr_clamp", 0.1),
-            fast_weight_max_norm=getattr(config, "fast_weight_max_norm", 10.0),
+            lr_clamp=getattr(config, "lr_clamp", 0.05),
+            fast_weight_max_norm=getattr(config, "fast_weight_max_norm", 8.0),
         ).float()
 
         self.consolidation = ConsolidationLayer(
@@ -180,20 +142,24 @@ class NATModel(nn.Module):
 
         self.adapt_every_n = config.adapt_every_n
         self._step_counter = 0
-        self._use_kv_cache = DynamicCache is not None
-        self._kv_cache = None
+        self._do_adapt = True  # toggled by training loop
+
+        # -------------------------------------------------------------- #
+        # Register hooks on base model layers                              #
+        # -------------------------------------------------------------- #
+        self._hook_handles: list = []
+        self._register_hooks()
 
         # -------------------------------------------------------------- #
         # Device-specific optimisations                                    #
         # -------------------------------------------------------------- #
         setup_device_optimisations(config)
 
-        # Gradient checkpointing — saves memory on MPS / small GPUs
+        # Gradient checkpointing
         self._gradient_checkpointing = getattr(
             config, "gradient_checkpointing", False
         )
         if self._gradient_checkpointing:
-            # Enable on the base transformer layers (if supported)
             if hasattr(self.base_model, "gradient_checkpointing_enable"):
                 self.base_model.gradient_checkpointing_enable(
                     gradient_checkpointing_kwargs={"use_reentrant": False}
@@ -209,18 +175,13 @@ class NATModel(nn.Module):
             self.consolidation = torch.compile(self.consolidation)
             logger.info("torch.compile applied to adaptive & consolidation layers.")
 
-        # CUDA AMP autocast for frozen base layers
-        self._cuda_amp = (
-            getattr(config, "cuda_amp", False) and device_str == "cuda"
-        )
-
         # Periodic cache clearing (MPS)
         self._empty_cache_every = getattr(config, "empty_cache_every", 0)
 
         logger.info(
-            f"NAT model built: {self.num_layers} base layers, "
+            f"NAT model built (hooks): {self.num_layers} base layers, "
             f"d_model={self.d_model}, "
-            f"inserts at {self.insert_A}/{self.insert_B}/{self.insert_C}, "
+            f"hooks at {self.insert_A}/{self.insert_B}/{self.insert_C}, "
             f"device={device_str}, "
             f"grad_ckpt={self._gradient_checkpointing}, "
             f"compile={self._compile_model}"
@@ -237,14 +198,13 @@ class NATModel(nn.Module):
         and lm_head regardless of the exact HuggingFace model class.
 
         Supports the ``model.model.layers`` layout used by Llama, Qwen2,
-        Mistral, Gemma, etc.  Also supports a flat mock layout where
-        ``embed_tokens``, ``layers``, ``norm`` live directly on the model.
+        Qwen3, Mistral, Gemma, etc.  Also supports a flat mock layout
+        where ``embed_tokens``, ``layers``, ``norm`` live directly on
+        the model.
         """
         # --- Transformer backbone ---
-        # Most HF causal LMs: model.model  (e.g. Qwen2ForCausalLM.model)
         if hasattr(self.base_model, "model") and hasattr(self.base_model.model, "layers"):
             self._transformer = self.base_model.model
-        # Flat mock models used in tests
         elif hasattr(self.base_model, "layers") and hasattr(self.base_model, "embed_tokens"):
             self._transformer = self.base_model
         else:
@@ -256,7 +216,7 @@ class NATModel(nn.Module):
         self._layers = self._transformer.layers
         self.num_layers = len(self._layers)
 
-        # --- Hidden size ---
+        # --- Hidden size (auto-detect) ---
         if hasattr(self.base_model, "config") and hasattr(self.base_model.config, "hidden_size"):
             self.d_model = self.base_model.config.hidden_size
         else:
@@ -271,8 +231,70 @@ class NATModel(nn.Module):
         else:
             self._lm_head = None  # tests without lm_head
 
-        # --- Rotary embeddings ---
-        self._has_rotary = hasattr(self._transformer, "rotary_emb")
+    # ------------------------------------------------------------------ #
+    # Hook registration                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _register_hooks(self) -> None:
+        """
+        Register forward hooks on base model layers to inject adaptive
+        and consolidation layers.
+
+        Each hook intercepts the layer's output, casts hidden states to
+        float32 for numerical stability in the adaptive/consolidation
+        layers, and returns the modified output in the original dtype.
+
+        The hook returns the EXACT same tuple format as the original
+        layer output.
+        """
+        layers = self._layers
+
+        def make_adaptive_hook(adaptive_layer):
+            def hook(module, input, output):
+                # output is a tuple: (hidden_states, ...) or just a tensor
+                if isinstance(output, tuple):
+                    hidden = output[0]
+                    base_dtype = hidden.dtype
+                    h_float = hidden.float()
+                    h_float = adaptive_layer(h_float, do_adapt=self._do_adapt)
+                    return (h_float.to(base_dtype),) + output[1:]
+                else:
+                    base_dtype = output.dtype
+                    h_float = output.float()
+                    h_float = adaptive_layer(h_float, do_adapt=self._do_adapt)
+                    return h_float.to(base_dtype)
+            return hook
+
+        def consolidation_hook(module, input, output):
+            if isinstance(output, tuple):
+                hidden = output[0]
+                base_dtype = hidden.dtype
+                h_float = hidden.float()
+                h_float = self.consolidation(h_float)
+                return (h_float.to(base_dtype),) + output[1:]
+            else:
+                base_dtype = output.dtype
+                h_float = output.float()
+                h_float = self.consolidation(h_float)
+                return h_float.to(base_dtype)
+
+        # Register hooks
+        h1 = layers[self.insert_A].register_forward_hook(
+            make_adaptive_hook(self.adaptive_A)
+        )
+        h2 = layers[self.insert_B].register_forward_hook(
+            make_adaptive_hook(self.adaptive_B)
+        )
+        h3 = layers[self.insert_C].register_forward_hook(
+            consolidation_hook
+        )
+        self._hook_handles = [h1, h2, h3]
+
+    def remove_hooks(self) -> None:
+        """Remove all registered hooks (cleanup)."""
+        for h in self._hook_handles:
+            h.remove()
+        self._hook_handles = []
 
     # ------------------------------------------------------------------ #
     # Trainable parameter helpers                                          #
@@ -310,21 +332,19 @@ class NATModel(nn.Module):
     # ------------------------------------------------------------------ #
 
     def start_session(self, batch_size: int = 1) -> None:
-        """Reset fast weights and KV cache at the start of a new session / episode."""
+        """Reset fast weights at the start of a new session / episode."""
         self.adaptive_A.reset_fast_weights(batch_size)
         self.adaptive_B.reset_fast_weights(batch_size)
         self._step_counter = 0
-        self._kv_cache = DynamicCache() if self._use_kv_cache else None
 
     def end_session(self) -> None:
         """Consolidate learned fast weights, then partial-reset."""
         self.consolidation.consolidate([self.adaptive_A, self.adaptive_B])
         self.adaptive_A.partial_reset(self.config.session_reset_alpha)
         self.adaptive_B.partial_reset(self.config.session_reset_alpha)
-        self._kv_cache = None  # free cache memory
 
     # ------------------------------------------------------------------ #
-    # Forward pass                                                         #
+    # Forward pass (delegates to base model via hooks)                     #
     # ------------------------------------------------------------------ #
 
     def forward(
@@ -335,134 +355,63 @@ class NATModel(nn.Module):
         suppress_adapt: bool = False,
     ) -> dict[str, Any]:
         """
-        Forward pass with adaptive layer intervention.
+        Forward pass with adaptive layer intervention via hooks.
 
-        We manually iterate through the base model's decoder layers so
-        that our adaptive / consolidation layers can be applied between them.
+        The base model's own forward method handles all internals
+        (embedding, rotary, attention, KV cache, norm, lm_head).
+        Hooks on specific layers inject adaptive/consolidation logic.
 
         Parameters
         ----------
         input_ids : LongTensor, shape ``(batch, seq_len)``
         attention_mask : Tensor, shape ``(batch, seq_len)``, optional
-            1 = attend, 0 = masked.  If None, assumes all-attend.
         labels : LongTensor, shape ``(batch, seq_len)``, optional
-            Shifted internally for next-token prediction.  ``-100`` is ignored.
+            Shifted internally for next-token prediction.
         suppress_adapt : bool
             If True, force ``do_adapt=False`` so adaptation never fires.
-            Useful for building KV cache without modifying fast weights.
 
         Returns
         -------
         dict with keys ``"loss"`` (optional) and ``"logits"``.
         """
         batch_size, seq_len = input_ids.shape
-        device = input_ids.device
 
         # Initialise fast weights if needed
         if self.adaptive_A.fast_A is None:
             self.start_session(batch_size)
 
-        # ---- Embedding ----
-        hidden_states = self._transformer.embed_tokens(input_ids)
-        base_dtype = hidden_states.dtype
-
-        # ---- Position IDs / Rotary embeddings ----
-        # Use _step_counter as the offset so that successive chunks
-        # within an episode get correct absolute positions (0-31,
-        # 32-63, … 1536-2047) instead of always starting at 0.
-        pos_offset = self._step_counter
-        cache_position = torch.arange(
-            pos_offset, pos_offset + seq_len, device=device
-        )
-        position_ids = cache_position.unsqueeze(0).expand(batch_size, -1)
-
-        position_embeddings = None
-        if self._has_rotary:
-            position_embeddings = self._transformer.rotary_emb(
-                hidden_states, position_ids
-            )
-
-        # ---- KV cache context length ----
-        past_len = (
-            self._kv_cache.get_seq_length()
-            if self._kv_cache is not None
-            else 0
-        )
-
-        # ---- Causal mask ----
-        causal_mask = _make_causal_mask(
-            seq_len, hidden_states.dtype, device, past_len=past_len,
-        )
-
-        # ---- Update step counter & determine whether to adapt ----
-        self._step_counter += seq_len
-        do_adapt = (
+        # Update step counter & determine whether to adapt
+        saved_do_adapt = self._do_adapt
+        self._do_adapt = (
             not suppress_adapt
             and (self._step_counter % self.adapt_every_n) < seq_len
         )
+        self._step_counter += seq_len
 
-        # ---- Iterate through decoder layers ----
-        # Optionally wrap frozen layers in AMP autocast (CUDA only).
-        # Adaptive/consolidation layers always run in float32.
-        amp_ctx = (
-            torch.amp.autocast(
-                "cuda",
-                dtype=getattr(self.config, "torch_dtype", torch.bfloat16),
-            )
-            if self._cuda_amp
-            else nullcontext()
-        )
+        # Delegate to base model — hooks handle adaptive/consolidation
+        base_kwargs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "use_cache": False,
+        }
+        if attention_mask is not None:
+            base_kwargs["attention_mask"] = attention_mask
 
-        for i, layer in enumerate(self._layers):
-            # Build kwargs for this layer
-            layer_kwargs: dict[str, Any] = {
-                "attention_mask": causal_mask,
-                "position_ids": position_ids,
-                "use_cache": self._kv_cache is not None,
-                "cache_position": cache_position,
-            }
-            if self._kv_cache is not None:
-                layer_kwargs["past_key_values"] = self._kv_cache
-            if position_embeddings is not None:
-                layer_kwargs["position_embeddings"] = position_embeddings
+        output = self.base_model(**base_kwargs)
 
-            # Run frozen transformer layer (under AMP if enabled)
-            with amp_ctx:
-                layer_output = layer(hidden_states, **layer_kwargs)
+        # Restore do_adapt flag
+        self._do_adapt = saved_do_adapt
 
-            # Handle output: some layers return a tensor, some a tuple
-            if isinstance(layer_output, tuple):
-                hidden_states = layer_output[0]
-            else:
-                hidden_states = layer_output
-
-            # ---- Insert adaptive / consolidation layers ----
-            if i == self.insert_A:
-                h_float = hidden_states.float()
-                h_float = self.adaptive_A(h_float, do_adapt=do_adapt)
-                hidden_states = h_float.to(base_dtype)
-            elif i == self.insert_B:
-                h_float = hidden_states.float()
-                h_float = self.adaptive_B(h_float, do_adapt=do_adapt)
-                hidden_states = h_float.to(base_dtype)
-            elif i == self.insert_C:
-                h_float = hidden_states.float()
-                h_float = self.consolidation(h_float)
-                hidden_states = h_float.to(base_dtype)
-
-        # ---- Detach KV cache to keep gradients only through fast weights ----
-        self._detach_kv_cache()
-
-        # ---- Final norm ----
-        hidden_states = self._transformer.norm(hidden_states)
-
-        # ---- LM head ----
-        if self._lm_head is not None:
-            logits = self._lm_head(hidden_states).float()
+        # Extract logits
+        if hasattr(output, "logits"):
+            logits = output.logits.float()
+        elif isinstance(output, tuple):
+            logits = output[0].float()
+        elif isinstance(output, dict):
+            logits = output["logits"].float()
         else:
-            logits = hidden_states.float()
+            logits = output.float()
 
-        # ---- Loss ----
+        # Compute loss if labels provided
         loss = None
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()
@@ -486,17 +435,19 @@ class NATModel(nn.Module):
         atol: float = 1e-3,
     ) -> dict[str, Any]:
         """
-        Verify that the manual forward pass matches the base model's output
-        when adaptive layers have reset fast weights (gate ≈ 0.007, LayerNorm
-        on memory branch only → near-identity).
+        Verify that the hook-based forward pass matches the base model's
+        output when adaptive layers have reset fast weights (gate ≈ 0.007,
+        LayerNorm on memory branch only → near-identity).
 
         Returns dict with ``"max_diff"``, ``"mean_diff"``, ``"passes"``.
         """
-        # Base model reference
+        # Remove hooks temporarily for clean base model output
+        self.remove_hooks()
         ref = self.base_model(input_ids, use_cache=False)
         ref_logits = ref.logits if hasattr(ref, "logits") else ref[0]
+        self._register_hooks()
 
-        # Our forward
+        # Our forward (with hooks)
         self.start_session(input_ids.shape[0])
         out = self.forward(input_ids)
         nat_logits = out["logits"]
@@ -512,27 +463,6 @@ class NATModel(nn.Module):
     # Diagnostics                                                          #
     # ------------------------------------------------------------------ #
 
-    # ------------------------------------------------------------------ #
-    # KV cache helpers                                                     #
-    # ------------------------------------------------------------------ #
-
-    def _detach_kv_cache(self) -> None:
-        """Detach all cached K/V tensors so gradients flow only through fast weights."""
-        if self._kv_cache is None:
-            return
-        # Modern transformers (≥4.45): cache.layers list
-        if hasattr(self._kv_cache, "layers"):
-            for layer_cache in self._kv_cache.layers:
-                if hasattr(layer_cache, "keys") and layer_cache.keys is not None:
-                    layer_cache.keys = layer_cache.keys.detach()
-                    layer_cache.values = layer_cache.values.detach()
-        # Older transformers: key_cache / value_cache lists
-        elif hasattr(self._kv_cache, "key_cache"):
-            for i in range(len(self._kv_cache.key_cache)):
-                if isinstance(self._kv_cache.key_cache[i], torch.Tensor):
-                    self._kv_cache.key_cache[i] = self._kv_cache.key_cache[i].detach()
-                    self._kv_cache.value_cache[i] = self._kv_cache.value_cache[i].detach()
-
     def diagnostics(self) -> dict[str, Any]:
         """Return a dict of diagnostic stats for logging."""
         d: dict[str, Any] = {}
@@ -543,6 +473,4 @@ class NATModel(nn.Module):
         d.update({f"consolidation/{k}": v
                   for k, v in self.consolidation.consolidated_weight_stats().items()})
         d["step_counter"] = self._step_counter
-        if self._kv_cache is not None:
-            d["kv_cache_tokens"] = self._kv_cache.get_seq_length()
         return d

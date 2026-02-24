@@ -1,5 +1,5 @@
 """
-Tests for Phase 2 episodic multi-task training.
+Tests for Phase 2 consolidation training.
 
 Uses the same mock base model from test_forward_pass to avoid
 downloading real pretrained weights.
@@ -8,7 +8,7 @@ Tests cover:
   1. Episodic data module — SyntheticEpisodicDataset, spans, dataloader
   2. compute_episodic_loss — per-problem losses, improvement bonus
   3. Single episodic training step — loss finite, params update
-  4. Full Phase 2 loop — runs N episodes without error
+  4. Full Phase 1 episodic loop — runs N episodes without error
   5. Improvement tracking — per-problem losses & bonus are recorded
   6. Checkpoint save / load round-trip
   7. Integration — Phase 1 → Phase 2 continuation
@@ -27,15 +27,15 @@ from torch.utils.data import DataLoader
 from nat.model.nat_model import NATModel
 from nat.training.data import (
     SyntheticEpisodicDataset,
-    build_phase2_dataloader,
+    build_phase1_dataloader,
     collate_episodic,
 )
-from nat.training.phase2_episodic import (
+from nat.training.phase1_episodic import (
     compute_episodic_loss,
     train_one_episodic_step,
-    train_phase2,
+    train_phase1,
 )
-from nat.training.phase1_meta_learn import _save_checkpoint, load_checkpoint
+from nat.training.train_utils import save_checkpoint as _save_checkpoint, load_checkpoint
 
 # Reuse mock model from test_forward_pass
 from tests.test_forward_pass import (
@@ -66,14 +66,14 @@ class Phase2TestConfig:
     lr_clamp: float = 0.1
     fast_weight_max_norm: float = 10.0
     torch_dtype: torch.dtype = torch.float32
-    # Training (Phase 2)
+    # Training (Phase 1 episodic, tested via Phase 2 integration)
     lr: float = 1e-3
-    lr_phase2: float = 1e-3
+    lr_phase1: float = 1e-3
     weight_decay: float = 0.01
-    num_episodes_p2: int = 10
+    num_episodes_p1: int = 10
     num_problems_per_episode: int = 4
     improvement_weight: float = 0.1
-    adapt_problems_p2: int = 2
+    adapt_problems_p1: int = 2
     batch_size: int = 2
     seq_len: int = 32
     truncated_bptt: int = 0
@@ -81,7 +81,7 @@ class Phase2TestConfig:
     # Logging
     log_every: int = 5
     save_every: int = 100
-    save_path: str = "/tmp/nat_test_phase2.pt"
+    save_path: str = "/tmp/nat_test_phase1.pt"
     wandb_project: str = "test"
     wandb_entity: str = None
     # Data
@@ -198,7 +198,7 @@ class TestEpisodicDataModule:
         assert ds1[0]["problem_spans"] == ds2[0]["problem_spans"]
 
     def test_build_dataloader_synthetic(self, config):
-        dl = build_phase2_dataloader(config, synthetic=True)
+        dl = build_phase1_dataloader(config, synthetic=True)
         batch = next(iter(dl))
         assert batch["input_ids"].shape == (config.batch_size, config.seq_len)
         assert "problem_spans" in batch
@@ -341,7 +341,7 @@ class TestSingleEpisodicStep:
             config,
         )
         assert "per_problem_losses" in metrics
-        expected_eval = config.num_problems_per_episode - config.adapt_problems_p2
+        expected_eval = config.num_problems_per_episode - config.adapt_problems_p1
         assert len(metrics["per_problem_losses"]) == expected_eval
 
     def test_step_reports_improvement(self, model, dummy_batch, optimizer, config):
@@ -365,39 +365,39 @@ class TestSingleEpisodicStep:
             optimizer,
             config,
         )
-        expected_eval = config.num_problems_per_episode - config.adapt_problems_p2
+        expected_eval = config.num_problems_per_episode - config.adapt_problems_p1
         assert metrics["num_problems"] == expected_eval
 
 
 # ============================================================
-# 4. Full Phase 2 loop
+# 4. Full Phase 1 episodic loop
 # ============================================================
 
-class TestFullPhase2Loop:
+class TestFullPhase1Loop:
     def test_runs_n_episodes(self, base_model):
-        config = Phase2TestConfig(num_episodes_p2=6, log_every=3)
+        config = Phase2TestConfig(num_episodes_p1=6, log_every=3)
         model = NATModel(config, base_model=base_model, tokenizer=None)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config.save_path = os.path.join(tmpdir, "phase2.pt")
-            result = train_phase2(model, config, synthetic=True)
+            config.save_path = os.path.join(tmpdir, "phase1.pt")
+            result = train_phase1(model, config, synthetic=True)
 
         assert result["num_episodes_run"] == 6
         assert result["final_loss"] == result["final_loss"]  # not NaN
 
     def test_no_nans_throughout(self, base_model):
-        config = Phase2TestConfig(num_episodes_p2=10, log_every=5)
+        config = Phase2TestConfig(num_episodes_p1=10, log_every=5)
         model = NATModel(config, base_model=base_model, tokenizer=None)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config.save_path = os.path.join(tmpdir, "phase2.pt")
-            result = train_phase2(model, config, synthetic=True)
+            config.save_path = os.path.join(tmpdir, "phase1.pt")
+            result = train_phase1(model, config, synthetic=True)
 
         assert result["final_loss"] == result["final_loss"]
 
     def test_custom_dataloader(self, base_model):
         """User can pass their own DataLoader."""
-        config = Phase2TestConfig(num_episodes_p2=4, log_every=2)
+        config = Phase2TestConfig(num_episodes_p1=4, log_every=2)
         model = NATModel(config, base_model=base_model, tokenizer=None)
 
         ds = SyntheticEpisodicDataset(
@@ -409,8 +409,8 @@ class TestFullPhase2Loop:
                         collate_fn=collate_episodic, drop_last=True)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config.save_path = os.path.join(tmpdir, "phase2.pt")
-            result = train_phase2(model, config, dataloader=dl)
+            config.save_path = os.path.join(tmpdir, "phase1.pt")
+            result = train_phase1(model, config, dataloader=dl)
 
         assert result["num_episodes_run"] == 4
 
@@ -459,13 +459,13 @@ class TestImprovementTracking:
 class TestPhase2Checkpointing:
     def test_checkpoint_during_training(self, base_model):
         config = Phase2TestConfig(
-            num_episodes_p2=4, save_every=2, log_every=2
+            num_episodes_p1=4, save_every=2, log_every=2
         )
         model = NATModel(config, base_model=base_model, tokenizer=None)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            config.save_path = os.path.join(tmpdir, "phase2.pt")
-            train_phase2(model, config, synthetic=True)
+            config.save_path = os.path.join(tmpdir, "phase1.pt")
+            train_phase1(model, config, synthetic=True)
             assert os.path.exists(config.save_path)
 
     def test_checkpoint_round_trip(self, base_model, config):
@@ -493,34 +493,31 @@ class TestPhase2Checkpointing:
 # ============================================================
 
 class TestPhase1ToPhase2:
-    def test_phase1_checkpoint_loads_into_phase2(self, base_model):
-        """A model trained with Phase 1 can continue to Phase 2."""
-        from nat.training.phase1_meta_learn import train_phase1
+    def test_phase1_checkpoint_loads_for_continued_training(self, base_model):
+        """A model trained with Phase 1 can continue training."""
+        from nat.training.phase1_episodic import train_phase1 as _train_phase1
 
         # Phase 1 quick training
         p1_config = Phase2TestConfig(
-            num_episodes_p2=4,  # unused for Phase 1
+            num_episodes_p1=4,
         )
-        # Phase1 needs num_episodes / num_episodes_p1
-        p1_config.num_episodes = 4
-        p1_config.num_episodes_p1 = 4
         p1_config.lr_phase1 = 1e-3
 
         model = NATModel(p1_config, base_model=base_model, tokenizer=None)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             p1_config.save_path = os.path.join(tmpdir, "phase1.pt")
-            result1 = train_phase1(model, p1_config, synthetic=True)
+            result1 = _train_phase1(model, p1_config, synthetic=True)
 
-            # Load into Phase 2
+            # Load checkpoint and continue
             base2 = MockCausalLM(D_MODEL, NUM_LAYERS, NUM_HEADS, VOCAB_SIZE)
             model2 = NATModel(p1_config, base_model=base2, tokenizer=None)
             load_checkpoint(model2, result1["save_path"])
 
-            # Now run Phase 2
-            p2_config = Phase2TestConfig(num_episodes_p2=4, log_every=2)
-            p2_config.save_path = os.path.join(tmpdir, "phase2.pt")
-            result2 = train_phase2(model2, p2_config, synthetic=True)
+            # Run more Phase 1 training
+            p1b_config = Phase2TestConfig(num_episodes_p1=4, log_every=2)
+            p1b_config.save_path = os.path.join(tmpdir, "phase1b.pt")
+            result2 = train_phase1(model2, p1b_config, synthetic=True)
 
         assert result2["final_loss"] == result2["final_loss"]  # not NaN
         assert result2["num_episodes_run"] == 4
