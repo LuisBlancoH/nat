@@ -95,7 +95,6 @@ def save_checkpoint(model, path: str, episode_idx: int) -> None:
             "episode": episode_idx,
             "adaptive_A": _strip_compile_prefix(model.adaptive_A.state_dict()),
             "adaptive_B": _strip_compile_prefix(model.adaptive_B.state_dict()),
-            "consolidation": _strip_compile_prefix(model.consolidation.state_dict()),
         },
         path,
     )
@@ -129,9 +128,7 @@ def load_checkpoint(model, path: str) -> int:
     model.adaptive_B.load_state_dict(
         _strip_compile_prefix(state["adaptive_B"])
     )
-    model.consolidation.load_state_dict(
-        _strip_compile_prefix(state["consolidation"])
-    )
+
     episode = state.get("episode", 0)
     logger.info(f"Checkpoint loaded ← {path}  (episode {episode})")
     return episode

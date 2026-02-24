@@ -182,7 +182,6 @@ class TestConstruction:
     def test_insertion_points_valid(self, nat_model):
         assert 0 <= nat_model.insert_A < nat_model.num_layers
         assert nat_model.insert_A < nat_model.insert_B < nat_model.num_layers
-        assert nat_model.insert_B <= nat_model.insert_C < nat_model.num_layers
 
     def test_base_model_frozen(self, nat_model):
         for name, param in nat_model.base_model.named_parameters():
@@ -258,18 +257,21 @@ class TestSessionLifecycle:
         init_A = nat_model.adaptive_A.fast_A_init.unsqueeze(0).expand(BATCH, -1, -1).detach()
         assert torch.allclose(A_reset, init_A, atol=1e-6)
 
-    def test_end_session_consolidates(self, nat_model, dummy_ids):
-        assert nat_model.consolidation.is_empty
-
-        # Adapt
+    def test_end_session_partial_reset(self, nat_model, dummy_ids):
+        # Adapt to move fast weights away from init
         _ = nat_model(dummy_ids)
         _ = nat_model(dummy_ids)
+        A_adapted = nat_model.adaptive_A.fast_A.detach().clone()
 
-        # End session
+        # End session (partial reset)
         nat_model.end_session()
 
-        # Consolidation should have absorbed something
-        assert not nat_model.consolidation.is_empty
+        # Fast weights should have moved back toward init (partial reset)
+        A_after = nat_model.adaptive_A.fast_A.detach()
+        init_A = nat_model.adaptive_A.fast_A_init.unsqueeze(0).expand_as(A_after).detach()
+        dist_before = (A_adapted - init_A).norm().item()
+        dist_after = (A_after - init_A).norm().item()
+        assert dist_after < dist_before, "end_session partial reset did not move fast weights toward init"
 
     def test_step_counter_resets(self, nat_model, dummy_ids):
         _ = nat_model(dummy_ids)
@@ -392,7 +394,6 @@ class TestDiagnostics:
         diag = nat_model.diagnostics()
         assert "adaptive_A/fast_A_norm" in diag
         assert "adaptive_B/fast_A_norm" in diag
-        assert "consolidation/W_c_A_norm" in diag
         assert "step_counter" in diag
 
     def test_named_parameters(self, nat_model):
@@ -400,7 +401,7 @@ class TestDiagnostics:
         assert len(named) > 0
         names = [n for n, _ in named]
         assert any("adaptive_A" in n for n in names)
-        assert any("consolidation" in n for n in names)
+        assert any("adaptive_B" in n for n in names)
 
 
 # ============================================================

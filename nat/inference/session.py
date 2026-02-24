@@ -3,17 +3,15 @@ Session management for NAT inference.
 
 A *session* is the fundamental unit of inference-time learning.  Within a
 session the adaptive layers accumulate knowledge in their fast weights;
-between sessions the consolidation layer absorbs that knowledge via EMA
-and the fast weights are partially reset.
+between sessions the fast weights are partially reset.
 
 This module provides :class:`SessionManager` — a high-level wrapper around
 :class:`NATModel` that handles:
 
-* Loading a trained checkpoint (θ) and optional consolidated state.
+* Loading a trained checkpoint (θ).
 * Starting / ending sessions with proper lifecycle calls.
-* Saving / loading consolidated memory across process restarts.
 * Multi-session workflows (e.g. "read five documents, then query").
-* Diagnostic logging of fast-weight and consolidation statistics.
+* Diagnostic logging of fast-weight statistics.
 """
 
 from __future__ import annotations
@@ -111,7 +109,6 @@ class SessionManager:
         cls,
         config_path: str | Path,
         checkpoint_path: str | Path | None = None,
-        consolidated_path: str | Path | None = None,
         device: str | None = None,
     ) -> "SessionManager":
         """
@@ -122,11 +119,8 @@ class SessionManager:
         config_path : str | Path
             Path to a YAML config file.
         checkpoint_path : str | Path | None
-            Path to a Phase-1/2/3 checkpoint containing trained θ.
+            Path to a Phase-1 checkpoint containing trained θ.
             If ``None``, the model starts with untrained θ.
-        consolidated_path : str | Path | None
-            Path to a previously saved consolidated state.
-            If ``None``, consolidated weights start at zero.
         device : str | None
             Override the config's device setting.
 
@@ -144,10 +138,6 @@ class SessionManager:
         if checkpoint_path is not None:
             load_checkpoint(model, str(checkpoint_path))
 
-        if consolidated_path is not None:
-            model.consolidation.load_state(str(consolidated_path))
-            logger.info(f"Loaded consolidated state from {consolidated_path}")
-
         return cls(model, config)
 
     # ------------------------------------------------------------------ #
@@ -158,8 +148,8 @@ class SessionManager:
         """
         Begin a new session.
 
-        Resets fast weights (with partial retention from consolidation)
-        and prepares the model for a new stream of input.
+        Resets fast weights (partial reset) and prepares the model for a new
+        stream of input.
 
         Raises
         ------
@@ -184,8 +174,7 @@ class SessionManager:
         """
         End the current session.
 
-        Triggers consolidation (EMA update of consolidated weights from
-        current fast weights) and partial reset.
+        Performs a partial fast-weight reset.
 
         Returns
         -------
@@ -343,44 +332,6 @@ class SessionManager:
         }
 
     # ------------------------------------------------------------------ #
-    # Persistence — consolidated memory                                    #
-    # ------------------------------------------------------------------ #
-
-    def save_consolidated(self, path: str | Path) -> Path:
-        """
-        Save the consolidated memory to disk.
-
-        This allows resuming inference across process restarts without
-        losing cross-session knowledge.
-
-        Parameters
-        ----------
-        path : str | Path
-            Destination file path.
-
-        Returns
-        -------
-        Path
-            The resolved path that was written.
-        """
-        path = Path(path)
-        self.model.consolidation.save_state(path)
-        logger.info(f"Consolidated state saved → {path}")
-        return path
-
-    def load_consolidated(self, path: str | Path) -> None:
-        """
-        Load consolidated memory from disk.
-
-        Parameters
-        ----------
-        path : str | Path
-            Path to a previously saved consolidated state.
-        """
-        self.model.consolidation.load_state(str(path))
-        logger.info(f"Consolidated state loaded ← {path}")
-
-    # ------------------------------------------------------------------ #
     # Persistence — full session history                                   #
     # ------------------------------------------------------------------ #
 
@@ -391,7 +342,6 @@ class SessionManager:
         data = {
             "session_count": self._session_count,
             "sessions": [s.to_dict() for s in self._history],
-            "consolidation_stats": self.model.consolidation.consolidated_weight_stats(),
         }
         path.write_text(json.dumps(data, indent=2))
         logger.info(f"Session history saved → {path}")
@@ -407,7 +357,6 @@ class SessionManager:
         d["session_count"] = self._session_count
         d["session_active"] = self._session_active
         d["tokens_this_session"] = self._tokens_this_session
-        d["consolidation_empty"] = self.model.consolidation.is_empty
         return d
 
     def summary(self) -> str:
@@ -417,7 +366,6 @@ class SessionManager:
             f"NAT SessionManager",
             f"  Sessions completed: {d['session_count']}",
             f"  Session active:     {d['session_active']}",
-            f"  Consolidation empty:{d['consolidation_empty']}",
         ]
         if d["session_active"]:
             lines.append(f"  Tokens this session:{d['tokens_this_session']}")

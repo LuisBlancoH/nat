@@ -29,7 +29,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from nat.model.adaptive_layer import AdaptiveMemoryLayer
-from nat.model.consolidation_layer import ConsolidationLayer
 from nat.model.utils import (
     count_parameters,
     print_parameter_summary,
@@ -128,17 +127,9 @@ class NATModel(nn.Module):
             fast_weight_max_norm=getattr(config, "fast_weight_max_norm", 8.0),
         ).float()
 
-        self.consolidation = ConsolidationLayer(
-            self.d_model,
-            rank=config.rank,
-            d_hidden=config.d_hidden,
-            beta=config.beta,
-        ).float()
-
         # Insertion points (after these layer indices)
         self.insert_A = self.num_layers // 3
         self.insert_B = (2 * self.num_layers) // 3
-        self.insert_C = (5 * self.num_layers) // 6
 
         self.adapt_every_n = config.adapt_every_n
         self._step_counter = 0
@@ -173,8 +164,7 @@ class NATModel(nn.Module):
         if self._compile_model and device_str == "cuda":
             self.adaptive_A = torch.compile(self.adaptive_A)
             self.adaptive_B = torch.compile(self.adaptive_B)
-            self.consolidation = torch.compile(self.consolidation)
-            logger.info("torch.compile applied to adaptive & consolidation layers.")
+            logger.info("torch.compile applied to adaptive layers.")
 
         # Periodic cache clearing (MPS)
         self._empty_cache_every = getattr(config, "empty_cache_every", 0)
@@ -182,7 +172,7 @@ class NATModel(nn.Module):
         logger.info(
             f"NAT model built (hooks): {self.num_layers} base layers, "
             f"d_model={self.d_model}, "
-            f"hooks at {self.insert_A}/{self.insert_B}/{self.insert_C}, "
+            f"hooks at {self.insert_A}/{self.insert_B}, "
             f"device={device_str}, "
             f"grad_ckpt={self._gradient_checkpointing}, "
             f"compile={self._compile_model}"
@@ -274,19 +264,6 @@ class NATModel(nn.Module):
                     return h_float.to(base_dtype)
             return hook
 
-        def consolidation_hook(module, input, output):
-            if isinstance(output, tuple):
-                hidden = output[0]
-                base_dtype = hidden.dtype
-                h_float = hidden.float()
-                h_float = self.consolidation(h_float)
-                return (h_float.to(base_dtype),) + output[1:]
-            else:
-                base_dtype = output.dtype
-                h_float = output.float()
-                h_float = self.consolidation(h_float)
-                return h_float.to(base_dtype)
-
         # Register hooks
         h1 = layers[self.insert_A].register_forward_hook(
             make_adaptive_hook(self.adaptive_A)
@@ -294,10 +271,7 @@ class NATModel(nn.Module):
         h2 = layers[self.insert_B].register_forward_hook(
             make_adaptive_hook(self.adaptive_B)
         )
-        h3 = layers[self.insert_C].register_forward_hook(
-            consolidation_hook
-        )
-        self._hook_handles = [h1, h2, h3]
+        self._hook_handles = [h1, h2]
 
     def remove_hooks(self) -> None:
         """Remove all registered hooks (cleanup)."""
@@ -314,7 +288,6 @@ class NATModel(nn.Module):
         params: list[nn.Parameter] = []
         params.extend(self.adaptive_A.parameters())
         params.extend(self.adaptive_B.parameters())
-        params.extend(self.consolidation.parameters())
         return params
 
     def get_trainable_named_parameters(self) -> list[tuple[str, nn.Parameter]]:
@@ -323,7 +296,6 @@ class NATModel(nn.Module):
         for prefix, mod in [
             ("adaptive_A", self.adaptive_A),
             ("adaptive_B", self.adaptive_B),
-            ("consolidation", self.consolidation),
         ]:
             for name, param in mod.named_parameters():
                 pairs.append((f"{prefix}.{name}", param))
@@ -333,7 +305,6 @@ class NATModel(nn.Module):
         print_parameter_summary({
             "adaptive_A": self.adaptive_A,
             "adaptive_B": self.adaptive_B,
-            "consolidation": self.consolidation,
         })
 
     # ------------------------------------------------------------------ #
@@ -347,8 +318,7 @@ class NATModel(nn.Module):
         self._step_counter = 0
 
     def end_session(self) -> None:
-        """Consolidate learned fast weights, then partial-reset."""
-        self.consolidation.consolidate([self.adaptive_A, self.adaptive_B])
+        """Partial-reset fast weights at end of session."""
         self.adaptive_A.partial_reset(self.config.session_reset_alpha)
         self.adaptive_B.partial_reset(self.config.session_reset_alpha)
 
@@ -507,7 +477,5 @@ class NATModel(nn.Module):
                   for k, v in self.adaptive_A.fast_weight_stats().items()})
         d.update({f"adaptive_B/{k}": v
                   for k, v in self.adaptive_B.fast_weight_stats().items()})
-        d.update({f"consolidation/{k}": v
-                  for k, v in self.consolidation.consolidated_weight_stats().items()})
         d["step_counter"] = self._step_counter
         return d

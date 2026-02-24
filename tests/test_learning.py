@@ -186,47 +186,41 @@ class TestBPTT:
 
 class TestConsolidationIntegration:
     def test_consolidation_absorbs_after_session(self, make_model, input_ids):
+        """After end_session the fast weights should have been partially reset."""
         model = make_model()
         model.eval()
-
-        assert model.consolidation.is_empty
 
         model.start_session(BATCH)
         for _ in range(5):
             _ = model(input_ids)
+
+        # Capture fast weights before reset
+        A_before = model.adaptive_A.fast_A.detach().clone()
+
         model.end_session()
 
-        assert not model.consolidation.is_empty
+        # After partial reset, fast weights should have moved toward init
+        A_after = model.adaptive_A.fast_A.detach()
+        init_A = model.adaptive_A.fast_A_init.unsqueeze(0).expand_as(A_after).detach()
+        dist_before = (A_before - init_A).norm().item()
+        dist_after = (A_after - init_A).norm().item()
+        assert dist_after < dist_before, "end_session partial reset did not move fast weights toward init"
 
     def test_consolidation_affects_output(self, make_model, input_ids):
-        """After consolidation, a fresh session's first output should differ
-        from one without consolidation."""
-        # Use aggressive beta so consolidation is clearly visible
-        config = TestConfig()
-        config.beta = 0.5  # much more aggressive than default 0.99
-        base = MockCausalLM(D_MODEL, NUM_LAYERS, NUM_HEADS, VOCAB_SIZE)
-        model = NATModel(config, base_model=base, tokenizer=None)
+        """Fast-weight adaptation changes the output within a session."""
+        model = make_model()
         model.eval()
 
-        # Baseline: fresh model, no consolidation
         model.start_session(BATCH)
         out_before = model(input_ids)["logits"].detach().clone()
 
-        # Adapt heavily and consolidate over multiple sessions
-        for session in range(5):
-            model.start_session(BATCH)
-            for _ in range(20):
-                _ = model(input_ids)
-            model.end_session()
+        for _ in range(20):
+            _ = model(input_ids)
 
-        # New session: consolidation should influence output
-        model.start_session(BATCH)
         out_after = model(input_ids)["logits"].detach().clone()
-
-        # They should differ because consolidation adds a read vector
         max_diff = (out_before - out_after).abs().max().item()
         assert max_diff > 1e-5, (
-            f"Consolidation had no effect on output in new session "
+            f"Adaptation had no effect on output within session "
             f"(max_diff={max_diff:.2e})"
         )
 

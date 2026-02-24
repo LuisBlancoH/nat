@@ -135,11 +135,6 @@ def main():
         logging.info(f"Loaded checkpoint from episode {episode}")
 
     # ---- Print summary ----
-    consolidation_params = sum(
-        p.numel() for p in model.consolidation.parameters()
-    )
-    logging.info(f"Consolidation parameters: {consolidation_params:,}")
-    logging.info("+ 2 scalar parameters: β (logit), α (logit)")
     model.print_param_summary()
 
     # ---- Train ----
