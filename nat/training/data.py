@@ -400,6 +400,12 @@ class MultiDomainEpisodeDataset(Dataset):
                 for n_seen, example in enumerate(ds):
                     if n_seen >= self.max_examples_per_source:
                         break
+                    if n_seen > 0 and n_seen % 1000 == 0:
+                        n_groups = len(groups_dict)
+                        logger.info(
+                            f"  {src['name']}: {n_seen}/{self.max_examples_per_source}"
+                            f" examples, {n_groups} groups so far..."
+                        )
                     try:
                         if filt is not None and not filt(example):
                             continue
