@@ -16,6 +16,40 @@ logger = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------ #
+# KV cache helpers                                                     #
+# ------------------------------------------------------------------ #
+
+def detach_kv_cache(past_key_values):
+    """Detach all tensors in a HuggingFace past_key_values tuple.
+
+    This breaks the gradient path through the KV cache so that
+    gradients for θ flow exclusively through the fast-weight updates,
+    not through the frozen base-model's attention.
+
+    Handles both the legacy tuple-of-tuples format and the newer
+    ``DynamicCache`` object.
+    """
+    if past_key_values is None:
+        return None
+
+    # DynamicCache (transformers ≥ 4.36) — has .key_cache / .value_cache
+    if hasattr(past_key_values, "key_cache"):
+        past_key_values.key_cache = [
+            k.detach() for k in past_key_values.key_cache
+        ]
+        past_key_values.value_cache = [
+            v.detach() for v in past_key_values.value_cache
+        ]
+        return past_key_values
+
+    # Legacy tuple-of-tuples: ((k, v), (k, v), ...)
+    return tuple(
+        tuple(t.detach() for t in layer_kv)
+        for layer_kv in past_key_values
+    )
+
+
+# ------------------------------------------------------------------ #
 # Truncated BPTT helper                                                #
 # ------------------------------------------------------------------ #
 

@@ -58,6 +58,7 @@ from nat.training.train_utils import (
     maybe_truncate as _maybe_truncate,
     save_checkpoint as _save_checkpoint,
     load_checkpoint,
+    detach_kv_cache as _detach_kv_cache,
 )
 
 logger = logging.getLogger(__name__)
@@ -231,10 +232,15 @@ def _run_validation(
             model.start_session(batch_size)
             adapted_chunks: list[torch.Tensor] = []
             nc = 0
+            past_kv = None
             for cs in range(0, seq_len, chunk_size):
                 ce = min(cs + chunk_size, seq_len)
                 pos_ids = torch.arange(cs, ce, device=device).unsqueeze(0).expand(batch_size, -1)
-                out = model(input_ids[:, cs:ce], position_ids=pos_ids)
+                out = model(
+                    input_ids[:, cs:ce], position_ids=pos_ids,
+                    past_key_values=past_kv, use_cache=True,
+                )
+                past_kv = out.get("past_key_values")
                 if nc >= eval_logits_start_chunk:
                     adapted_chunks.append(out["logits"])
                 _maybe_truncate(model, nc, config)
@@ -251,14 +257,20 @@ def _run_validation(
                 labels=labels[:, logits_offset:] if labels is not None else None,
             )
 
-            # ---- Baseline (no adaptation) ----
+            # ---- Baseline (no adaptation, but with KV cache) ----
             model.start_session(batch_size)
             baseline_chunks: list[torch.Tensor] = []
             bnc = 0
+            bl_past_kv = None
             for cs in range(0, seq_len, chunk_size):
                 ce = min(cs + chunk_size, seq_len)
                 pos_ids = torch.arange(cs, ce, device=device).unsqueeze(0).expand(batch_size, -1)
-                out = model(input_ids[:, cs:ce], position_ids=pos_ids, suppress_adapt=True)
+                out = model(
+                    input_ids[:, cs:ce], position_ids=pos_ids,
+                    past_key_values=bl_past_kv, use_cache=True,
+                    suppress_adapt=True,
+                )
+                bl_past_kv = out.get("past_key_values")
                 if bnc >= eval_logits_start_chunk:
                     baseline_chunks.append(out["logits"])
                 bnc += 1
@@ -397,17 +409,24 @@ def train_one_episodic_step(
 
     all_logits_chunks: list[torch.Tensor] = []
 
+    past_kv = None  # KV cache carried across chunks
     for chunk_start in range(0, seq_len, chunk_size):
         chunk_end = min(chunk_start + chunk_size, seq_len)
         chunk_ids = input_ids[:, chunk_start:chunk_end]
 
         # Absolute position IDs so RoPE embeddings are correct
-        # even though attention is chunk-local.
         pos_ids = torch.arange(
             chunk_start, chunk_end, device=device,
         ).unsqueeze(0).expand(batch_size, -1)
 
-        output = model(chunk_ids, position_ids=pos_ids)
+        output = model(
+            chunk_ids, position_ids=pos_ids,
+            past_key_values=past_kv, use_cache=True,
+        )
+
+        # Carry KV cache forward (detached: gradients for θ flow
+        # through fast weights only, not through frozen-model KV).
+        past_kv = _detach_kv_cache(output.get("past_key_values"))
 
         # Only keep logits that overlap with eval spans
         if num_chunks >= eval_logits_start_chunk:
@@ -446,8 +465,7 @@ def train_one_episodic_step(
         saved_adapt_cell = model._adapt_cell[0]
 
         # Free KV cache before baseline to reduce peak memory
-        if hasattr(model, '_kv_cache'):
-            model._kv_cache = None
+        past_kv = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -458,13 +476,19 @@ def train_one_episodic_step(
             # Only collect logits for eval portion (same optimisation)
             baseline_chunks: list[torch.Tensor] = []
             bl_num_chunks = 0
+            bl_past_kv = None
             for chunk_start in range(0, seq_len, chunk_size):
                 chunk_end = min(chunk_start + chunk_size, seq_len)
                 chunk_ids = input_ids[:, chunk_start:chunk_end]
                 pos_ids = torch.arange(
                     chunk_start, chunk_end, device=device,
                 ).unsqueeze(0).expand(batch_size, -1)
-                out = model(chunk_ids, position_ids=pos_ids, suppress_adapt=True)
+                out = model(
+                    chunk_ids, position_ids=pos_ids,
+                    past_key_values=bl_past_kv, use_cache=True,
+                    suppress_adapt=True,
+                )
+                bl_past_kv = out.get("past_key_values")
                 if bl_num_chunks >= eval_logits_start_chunk:
                     baseline_chunks.append(out["logits"])
                 bl_num_chunks += 1

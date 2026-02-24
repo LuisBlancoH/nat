@@ -361,6 +361,8 @@ class NATModel(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.Tensor | None = None,
+        past_key_values: tuple | None = None,
+        use_cache: bool = False,
         labels: torch.Tensor | None = None,
         suppress_adapt: bool = False,
     ) -> dict[str, Any]:
@@ -379,6 +381,13 @@ class NATModel(nn.Module):
             Absolute position indices for RoPE.  When forwarding chunks
             of a longer sequence, pass the absolute positions so RoPE
             embeddings are correct even though attention is chunk-local.
+        past_key_values : tuple, optional
+            KV cache from a previous chunk.  Pass between successive
+            chunk forwards to give the model full causal attention over
+            the entire sequence processed so far.
+        use_cache : bool
+            If True, return ``past_key_values`` in the output dict so
+            the next chunk can attend to all previous tokens.
         labels : LongTensor, shape ``(batch, seq_len)``, optional
             Shifted internally for next-token prediction.
         suppress_adapt : bool
@@ -386,7 +395,8 @@ class NATModel(nn.Module):
 
         Returns
         -------
-        dict with keys ``"loss"`` (optional) and ``"logits"``.
+        dict with keys ``"loss"`` (optional), ``"logits"``, and
+        ``"past_key_values"`` (when ``use_cache=True``).
         """
         batch_size, seq_len = input_ids.shape
 
@@ -408,12 +418,14 @@ class NATModel(nn.Module):
         # Delegate to base model — hooks handle adaptive/consolidation
         base_kwargs: dict[str, Any] = {
             "input_ids": input_ids,
-            "use_cache": False,
+            "use_cache": use_cache,
         }
         if attention_mask is not None:
             base_kwargs["attention_mask"] = attention_mask
         if position_ids is not None:
             base_kwargs["position_ids"] = position_ids
+        if past_key_values is not None:
+            base_kwargs["past_key_values"] = past_key_values
 
         output = self.base_model(**base_kwargs)
 
@@ -441,7 +453,13 @@ class NATModel(nn.Module):
                 ignore_index=-100,
             )
 
-        return {"loss": loss, "logits": logits}
+        result = {"loss": loss, "logits": logits}
+        if use_cache:
+            pkv = getattr(output, "past_key_values", None)
+            if pkv is None and isinstance(output, dict):
+                pkv = output.get("past_key_values")
+            result["past_key_values"] = pkv
+        return result
 
     # ------------------------------------------------------------------ #
     # Parity check                                                         #
