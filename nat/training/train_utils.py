@@ -20,14 +20,15 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------ #
 
 def detach_kv_cache(past_key_values):
-    """Detach all tensors in a HuggingFace past_key_values tuple.
+    """Detach all tensors in a HuggingFace past_key_values object.
 
     This breaks the gradient path through the KV cache so that
     gradients for θ flow exclusively through the fast-weight updates,
     not through the frozen base-model's attention.
 
-    Handles both the legacy tuple-of-tuples format and the newer
-    ``DynamicCache`` object.
+    Always returns the same type as the input (``DynamicCache`` or
+    tuple-of-tuples) so downstream code can call ``.get_seq_length()``
+    etc.
     """
     if past_key_values is None:
         return None
@@ -43,6 +44,21 @@ def detach_kv_cache(past_key_values):
         return past_key_values
 
     # Legacy tuple-of-tuples: ((k, v), (k, v), ...)
+    # Wrap into a DynamicCache if the class is available, so that
+    # newer transformers versions can call .get_seq_length() on it.
+    try:
+        from transformers.cache_utils import DynamicCache
+        cache = DynamicCache()
+        for layer_kv in past_key_values:
+            k = layer_kv[0].detach() if layer_kv[0] is not None else None
+            v = layer_kv[1].detach() if layer_kv[1] is not None else None
+            if k is not None and v is not None:
+                cache.key_cache.append(k)
+                cache.value_cache.append(v)
+        return cache
+    except ImportError:
+        pass
+
     return tuple(
         tuple(t.detach() if t is not None else None for t in layer_kv)
         for layer_kv in past_key_values
