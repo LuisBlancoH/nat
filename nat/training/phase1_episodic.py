@@ -289,11 +289,16 @@ def _run_validation(
             )
 
             # ---- Frozen Qwen 3 baseline (no NAT at all) ----
+            # Temporarily remove hooks so the adaptive layers are fully
+            # bypassed — fast_A_init is a trained parameter and its read
+            # path would otherwise perturb the frozen baseline.
+            model.remove_hooks()
             frozen_out = model.base_model(
                 input_ids=input_ids,
                 position_ids=torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1),
                 use_cache=False,
             )
+            model._register_hooks()
             frozen_logits = frozen_out.logits[:, logits_offset:, :]
             _, fr_per_prob, _ = compute_episodic_loss(
                 frozen_logits, input_ids[:, logits_offset:],
