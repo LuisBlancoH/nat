@@ -289,6 +289,8 @@ def train_one_episodic_step(
         saved_A_b = model.adaptive_B.fast_A
         saved_B_b = model.adaptive_B.fast_B
         saved_step = model._step_counter
+        saved_do_adapt = model._do_adapt
+        saved_adapt_cell = model._adapt_cell[0]
 
         # Free KV cache before baseline to reduce peak memory
         if hasattr(model, '_kv_cache'):
@@ -327,6 +329,8 @@ def train_one_episodic_step(
         model.adaptive_B.fast_A = saved_A_b
         model.adaptive_B.fast_B = saved_B_b
         model._step_counter = saved_step
+        model._do_adapt = saved_do_adapt
+        model._adapt_cell[0] = saved_adapt_cell
 
         if baseline_loss_val is not None:
             adaptation_benefit = baseline_loss_val - total_loss.item()
