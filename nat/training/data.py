@@ -947,6 +947,7 @@ def build_phase1_dataloader(
     train_loader = DataLoader(
         dataset,
         batch_size=config.batch_size,
+        shuffle=True,
         num_workers=0,
         collate_fn=collate_episodic,
     )
