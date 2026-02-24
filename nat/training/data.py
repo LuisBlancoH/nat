@@ -333,7 +333,8 @@ class MultiDomainEpisodeDataset(Dataset):
         num_episodes: int = 50000,
         seq_len: int = 2048,
         num_problems: int = 8,
-        max_examples_per_source: int = 10_000,
+        max_examples_per_source: int = 2_000,
+        cache_dir: str | None = None,
     ):
         super().__init__()
         self.tokenizer = tokenizer
@@ -341,6 +342,8 @@ class MultiDomainEpisodeDataset(Dataset):
         self.seq_len = seq_len
         self.num_problems = num_problems
         self.max_examples_per_source = max_examples_per_source
+        # Cache directory for serialised domain groups (avoids re-fetching)
+        self.cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "nat" / "domain_groups"
 
         # domain_groups[domain_name] = list of context groups
         # Each context group is a list of (problem, solution) pairs
@@ -372,12 +375,50 @@ class MultiDomainEpisodeDataset(Dataset):
         """Load QA pairs from all available sources."""
         from datasets import load_dataset
 
+    def _load_sources(self):
+        """Load QA pairs from all available sources, with disk caching.
+
+        Cache key: hash of (source name, config, split, max_examples_per_source).
+        On a cache hit the network is not touched — startup is instant.
+        Delete ~/.cache/nat/domain_groups/ to force a re-fetch.
+        """
+        import hashlib
+        import pickle
+        from datasets import load_dataset
+
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
         loaded: list[str] = []
         failed: list[str] = []
 
         for src in self.SOURCES:
+            # ── Cache key ──────────────────────────────────────────────
+            cache_key = hashlib.md5(
+                f"{src['name']}|{src.get('config')}|{src['split']}|{self.max_examples_per_source}".encode()
+            ).hexdigest()
+            cache_file = self.cache_dir / f"{cache_key}.pkl"
+
+            # ── Cache hit ──────────────────────────────────────────────
+            if cache_file.exists():
+                try:
+                    with open(cache_file, "rb") as f:
+                        groups, domain = pickle.load(f)
+                    if domain not in self.domain_groups:
+                        self.domain_groups[domain] = []
+                    self.domain_groups[domain].extend(groups)
+                    total = sum(len(g) for g in groups)
+                    logger.info(
+                        f"  {src['name']}: {total} pairs ({len(groups)} groups)"
+                        f" [domain={domain}, from cache]"
+                    )
+                    loaded.append(src["name"])
+                    continue
+                except Exception:
+                    cache_file.unlink(missing_ok=True)  # corrupt cache, re-fetch
+
+            # ── Fetch from HuggingFace ─────────────────────────────────
             try:
-                logger.info(f"Loading {src['name']}...")
+                logger.info(f"Loading {src['name']} (max {self.max_examples_per_source} examples)...")
                 load_kwargs: dict[str, Any] = {}
                 if src.get("config"):
                     load_kwargs["name"] = src["config"]
@@ -444,6 +485,12 @@ class MultiDomainEpisodeDataset(Dataset):
                         f"  → {src['name']}: {total} pairs "
                         f"({len(groups)} groups) [domain={domain}]"
                     )
+                    # Save to disk cache — next run will skip the network fetch
+                    try:
+                        with open(cache_file, "wb") as f:
+                            pickle.dump((groups, domain), f)
+                    except Exception:
+                        pass  # cache write failure is non-fatal
                     loaded.append(src["name"])
                 else:
                     logger.warning(
@@ -767,7 +814,8 @@ def build_phase1_dataloader(
         num_episodes=getattr(config, "num_episodes_p1", 50000),
         seq_len=config.seq_len,
         num_problems=num_problems,
-        max_examples_per_source=getattr(config, "max_examples_per_source", 10_000),
+        max_examples_per_source=getattr(config, "max_examples_per_source", 2_000),
+        cache_dir=getattr(config, "dataset_cache_dir", None),
     )
 
     return DataLoader(

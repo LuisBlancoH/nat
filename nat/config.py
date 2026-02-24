@@ -40,7 +40,8 @@ class NATConfig:
     improvement_weight: float = 0.1
     num_problems_per_episode: int = 8
     adapt_problems_p1: int = 5
-    max_examples_per_source: int = 10_000  # cap per HF source for fast startup
+    max_examples_per_source: int = 2_000   # cap per HF source for fast startup
+    dataset_cache_dir: Optional[str] = None  # override ~/.cache/nat/domain_groups
 
     # Training - Phase 2 (consolidation across domains)
     lr_phase2: float = 1e-4
