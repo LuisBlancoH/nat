@@ -39,7 +39,10 @@ device: "auto"  # auto-detect: cuda > mps > cpu
 base_dtype: "bfloat16"
 
 # Performance (A100-80GB)
-gradient_checkpointing: true
+# gradient_checkpointing is incompatible with stateful hooks (fast_A/prev_h
+# mutation during adapt causes checkpoint recompute tensor-count mismatch).
+# A100-80GB has ample VRAM without it (~20 GB peak with batch_size 4).
+gradient_checkpointing: false
 compile_model: false
 tf32_matmul: true
 

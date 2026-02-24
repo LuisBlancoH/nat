@@ -55,7 +55,11 @@ class NATConfig:
     base_dtype: str = "bfloat16"
 
     # Performance / device-specific
-    gradient_checkpointing: bool = True
+    # NOTE: gradient checkpointing is incompatible with our hook-based
+    # architecture — hooks mutate fast_A/prev_h, and checkpoint
+    # recomputation re-fires hooks with stale state (different tensor
+    # count → CheckpointError).  Keep False.
+    gradient_checkpointing: bool = False
     compile_model: bool = False
     num_workers: int = 0
     pin_memory: bool = False
