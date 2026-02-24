@@ -44,7 +44,7 @@ def detach_kv_cache(past_key_values):
 
     # Legacy tuple-of-tuples: ((k, v), (k, v), ...)
     return tuple(
-        tuple(t.detach() for t in layer_kv)
+        tuple(t.detach() if t is not None else None for t in layer_kv)
         for layer_kv in past_key_values
     )
 
