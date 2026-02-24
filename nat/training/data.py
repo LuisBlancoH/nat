@@ -12,8 +12,8 @@ Phase 1 data sources (multi-domain with reasoning traces)
 - camel-ai/math — 50k problems across 25 sub-topics with step-by-step solutions
 - Hendrycks MATH (EleutherAI) — competition math across 7 subjects
 - MATH-Hard (lighteval) — hard competition math problems
+- OpenR1-Math-220k (open-r1) — competition math with CoT, pre-verified correct answers
 - CodeForces-CoTs (open-r1) — competitive programming with CoT, grouped by difficulty tier
-- LexGLUE ECtHR — European human rights cases grouped by violated article
 - DROP — reading comprehension with discrete reasoning
 - ScienceQA — science questions grouped by fine-grained skill (379 skills)
 
@@ -176,8 +176,8 @@ class MultiDomainEpisodeDataset(Dataset):
       - camel-ai/math      — grouped by sub_topic (~hundreds of exercise types)
       - Hendrycks MATH     — grouped by subject + difficulty level
       - MATH-Hard          — grouped by subject + difficulty level
+      - OpenR1-Math-220k   — grouped by problem_type; filtered to verified-correct only
       - CodeForces-CoTs    — grouped by contest_type + index (difficulty tier)
-      - LexGLUE ECtHR      — grouped by first violated ECHR article
       - DROP               — grouped by shared passage (section_id)
       - ScienceQA          — grouped by skill (379 fine-grained skills)
 
@@ -244,25 +244,23 @@ class MultiDomainEpisodeDataset(Dataset):
             # available difficulty/complexity proxy.
             "grouper": lambda ex: f"{ex.get('contest_type', 'CF')}_{ex.get('index', 'A')}",
         },
-        # ── Logic: LexGLUE ECtHR (European Court of Human Rights) ──
-        # Full case texts with multi-label article violations as answers.
-        # Grouped by the first violated article (e.g. "3", "6", "8").
+        # ── Math (hard): open-r1/OpenR1-Math-220k ──
+        # Competition math with full chain-of-thought reasoning.
+        # Pre-verified: correctness_count > 0 means at least one
+        # generation was confirmed correct by symbolic verifier.
+        # Grouped by problem_type (e.g. "algebra", "combinatorics").
         {
-            "name": "coastalcph/lex_glue",
-            "config": "ecthr_a",
-            "domain": "logic",
+            "name": "open-r1/OpenR1-Math-220k",
+            "config": None,
+            "domain": "math_hard",
             "split": "train",
             "formatter": lambda ex: (
-                ex.get("text", "")[0]
-                if isinstance(ex.get("text"), list) and ex["text"]
-                else str(ex.get("text", "")),
-                ", ".join(str(l) for l in ex.get("labels", []))
-                if ex.get("labels")
-                else "no violation",
+                ex.get("problem", ""),
+                ex.get("solution", ""),
             ),
-            "grouper": lambda ex: str(ex["labels"][0])
-            if isinstance(ex.get("labels"), list) and ex["labels"]
-            else "no_violation",
+            # Only use examples with at least one verified-correct generation
+            "filter": lambda ex: (ex.get("correctness_count") or 0) > 0,
+            "grouper": lambda ex: ex.get("problem_type", ex.get("source", "math")),
         },
         # ── Reading: DROP ──
         {
@@ -393,10 +391,13 @@ class MultiDomainEpisodeDataset(Dataset):
                 domain = src["domain"]
                 formatter = src["formatter"]
                 grouper = src.get("grouper")
+                filt = src.get("filter")  # optional predicate
 
                 groups_dict: dict[str, list[tuple[str, str]]] = {}
                 for example in ds:
                     try:
+                        if filt is not None and not filt(example):
+                            continue
                         q, a = formatter(example)
                         if not q or not a:
                             continue
@@ -600,7 +601,7 @@ class SyntheticDomainDataset(Dataset):
     """
 
     DOMAINS = [
-        "math", "math_hard", "code", "logic", "reading", "science",
+        "math", "math_hard", "code", "reading", "science",
     ]
 
     def __init__(
@@ -660,7 +661,7 @@ class SyntheticDomainDataset(Dataset):
 # ------------------------------------------------------------------ #
 
 DOMAINS: list[str] = [
-    "math", "math_hard", "code", "logic", "reading", "science",
+    "math", "math_hard", "code", "reading", "science",
 ]
 """Default domain names for Phase 2 consolidation training."""
 
@@ -817,6 +818,16 @@ def build_domain_dataloader(
                     f"Solution: {ex.get('solution', '')}\n\n"
                 ),
             },
+            {
+                "name": "open-r1/OpenR1-Math-220k",
+                "config": None,
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"Problem: {ex.get('problem', '')}\n"
+                    f"Solution: {ex.get('solution', '')}\n\n"
+                ),
+                "filter": lambda ex: (ex.get("correctness_count") or 0) > 0,
+            },
         ],
         "code": [
             {
@@ -826,17 +837,6 @@ def build_domain_dataloader(
                 "formatter": lambda ex: (
                     f"Problem: {ex.get('description', ex.get('prompt', ''))}\n"
                     f"Solution: {ex.get('generation', ex.get('editorial', ''))}\n\n"
-                ),
-            },
-        ],
-        "logic": [
-            {
-                "name": "coastalcph/lex_glue",
-                "config": "ecthr_a",
-                "split": "train",
-                "formatter": lambda ex: (
-                    f"Case: {ex['text'][0] if isinstance(ex.get('text'), list) and ex['text'] else str(ex.get('text', ''))}\n"
-                    f"Violated articles: {', '.join(str(l) for l in ex.get('labels', [])) or 'no violation'}\n\n"
                 ),
             },
         ],
