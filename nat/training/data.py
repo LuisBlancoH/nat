@@ -367,6 +367,8 @@ class MultiDomainEpisodeDataset(Dataset):
         num_problems: int = 8,
         max_examples_per_source: int = 10_000,
         cache_dir: str | None = None,
+        val_fraction: float = 0.0,
+        _preloaded_groups: dict[str, list[list[tuple[str, str]]]] | None = None,
     ):
         super().__init__()
         self.tokenizer = tokenizer
@@ -374,6 +376,7 @@ class MultiDomainEpisodeDataset(Dataset):
         self.seq_len = seq_len
         self.num_problems = num_problems
         self.max_examples_per_source = max_examples_per_source
+        self.val_fraction = val_fraction
         # Cache directory for serialised domain groups (avoids re-fetching)
         self.cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "nat" / "domain_groups"
 
@@ -395,7 +398,29 @@ class MultiDomainEpisodeDataset(Dataset):
         # domain_groups[domain_name] = list of context groups
         # Each context group is a list of (problem, solution) pairs
         self.domain_groups: dict[str, list[list[tuple[str, str]]]] = {}
-        self._load_sources()
+        self._val_groups: dict[str, list[list[tuple[str, str]]]] = {}
+
+        if _preloaded_groups is not None:
+            # Internal path: skip loading, use pre-split groups directly
+            self.domain_groups = _preloaded_groups
+        else:
+            self._load_sources()
+
+            # ---- Train / val split at the context-group level ----
+            if val_fraction > 0:
+                import random as _random
+                split_rng = _random.Random(42)  # deterministic split
+                for domain, groups in self.domain_groups.items():
+                    n_val = max(1, int(len(groups) * val_fraction))
+                    indices = list(range(len(groups)))
+                    split_rng.shuffle(indices)
+                    val_idx = set(indices[:n_val])
+                    self._val_groups[domain] = [
+                        groups[i] for i in sorted(val_idx)
+                    ]
+                    self.domain_groups[domain] = [
+                        groups[i] for i in sorted(set(indices) - val_idx)
+                    ]
 
         if not self.domain_groups:
             raise RuntimeError(
@@ -407,20 +432,49 @@ class MultiDomainEpisodeDataset(Dataset):
         total_pairs = sum(
             sum(len(g) for g in gs) for gs in self.domain_groups.values()
         )
+        split_label = "train" if self._val_groups or _preloaded_groups is not None else "all"
         logger.info(
-            f"Loaded {total_pairs} problem-solution pairs in "
+            f"Phase 1 [{split_label}]: {total_pairs} problem-solution pairs in "
             f"{total_groups} context groups across "
-            f"{len(self.domain_groups)} domains for Phase 1"
+            f"{len(self.domain_groups)} domains"
         )
         for domain, groups in self.domain_groups.items():
             n_pairs = sum(len(g) for g in groups)
             logger.info(
                 f"  {domain}: {n_pairs} pairs ({len(groups)} groups)"
             )
+        if self._val_groups:
+            val_total = sum(
+                sum(len(g) for g in gs) for gs in self._val_groups.values()
+            )
+            val_grp = sum(len(gs) for gs in self._val_groups.values())
+            logger.info(
+                f"Phase 1 [val]:   {val_total} pairs in {val_grp} groups"
+            )
 
-    def _load_sources(self):
-        """Load QA pairs from all available sources."""
-        from datasets import load_dataset
+    # ------------------------------------------------------------------ #
+    # Validation dataset factory                                           #
+    # ------------------------------------------------------------------ #
+
+    def create_val_dataset(
+        self, num_episodes: int = 500,
+    ) -> "MultiDomainEpisodeDataset":
+        """Create a validation dataset from held-out context groups.
+
+        Requires ``val_fraction > 0`` at construction time.
+        """
+        if not self._val_groups:
+            raise ValueError(
+                "No held-out validation groups.  "
+                "Construct the dataset with val_fraction > 0."
+            )
+        return MultiDomainEpisodeDataset(
+            tokenizer=self.tokenizer,
+            num_episodes=num_episodes,
+            seq_len=self.seq_len,
+            num_problems=self.num_problems,
+            _preloaded_groups=self._val_groups,
+        )
 
     def _load_sources(self):
         """Load QA pairs from all available sources, with disk caching.
@@ -824,7 +878,8 @@ def build_phase1_dataloader(
     ----------
     config : NATConfig
         Must have ``seq_len``, ``batch_size``, ``num_episodes_p1``,
-        ``num_problems_per_episode``.
+        ``num_problems_per_episode``.  If ``val_fraction > 0`` a
+        held-out validation loader is also returned.
     tokenizer : optional
         HuggingFace tokenizer.  Required unless ``synthetic=True``.
     synthetic : bool
@@ -832,7 +887,9 @@ def build_phase1_dataloader(
 
     Returns
     -------
-    DataLoader
+    tuple[DataLoader, DataLoader | None]
+        ``(train_loader, val_loader)``.  ``val_loader`` is ``None``
+        when ``synthetic=True`` or ``val_fraction == 0``.
     """
     num_problems = getattr(config, "num_problems_per_episode", 8)
 
@@ -850,7 +907,7 @@ def build_phase1_dataloader(
             drop_last=True,
             num_workers=0,
             collate_fn=collate_episodic,
-        )
+        ), None
 
     # ---- Real multi-domain episodic data ----
     assert tokenizer is not None, (
@@ -867,6 +924,8 @@ def build_phase1_dataloader(
 
     logger.info("Loading real episodic data (multi-domain)...")
 
+    val_fraction = getattr(config, "val_fraction", 0.0)
+
     dataset = MultiDomainEpisodeDataset(
         tokenizer=tokenizer,
         num_episodes=getattr(config, "num_episodes_p1", 50000),
@@ -874,14 +933,29 @@ def build_phase1_dataloader(
         num_problems=num_problems,
         max_examples_per_source=getattr(config, "max_examples_per_source", 2_000),
         cache_dir=getattr(config, "dataset_cache_dir", None),
+        val_fraction=val_fraction,
     )
 
-    return DataLoader(
+    train_loader = DataLoader(
         dataset,
         batch_size=config.batch_size,
         num_workers=0,
         collate_fn=collate_episodic,
     )
+
+    # Build validation loader if fraction > 0
+    val_loader = None
+    if val_fraction > 0 and dataset._val_groups:
+        val_episodes = getattr(config, "val_episodes", 500)
+        val_dataset = dataset.create_val_dataset(num_episodes=val_episodes)
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=config.batch_size,
+            num_workers=0,
+            collate_fn=collate_episodic,
+        )
+
+    return train_loader, val_loader
 
 
 def build_domain_dataloader(

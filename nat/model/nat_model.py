@@ -360,6 +360,7 @@ class NATModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
         labels: torch.Tensor | None = None,
         suppress_adapt: bool = False,
     ) -> dict[str, Any]:
@@ -374,6 +375,10 @@ class NATModel(nn.Module):
         ----------
         input_ids : LongTensor, shape ``(batch, seq_len)``
         attention_mask : Tensor, shape ``(batch, seq_len)``, optional
+        position_ids : LongTensor, shape ``(batch, seq_len)``, optional
+            Absolute position indices for RoPE.  When forwarding chunks
+            of a longer sequence, pass the absolute positions so RoPE
+            embeddings are correct even though attention is chunk-local.
         labels : LongTensor, shape ``(batch, seq_len)``, optional
             Shifted internally for next-token prediction.
         suppress_adapt : bool
@@ -407,6 +412,8 @@ class NATModel(nn.Module):
         }
         if attention_mask is not None:
             base_kwargs["attention_mask"] = attention_mask
+        if position_ids is not None:
+            base_kwargs["position_ids"] = position_ids
 
         output = self.base_model(**base_kwargs)
 

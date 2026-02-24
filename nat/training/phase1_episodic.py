@@ -163,6 +163,129 @@ def compute_episodic_loss(
 # ------------------------------------------------------------------ #
 # Single episodic training step                                        #
 # ------------------------------------------------------------------ #
+# Validation helper                                                    #
+# ------------------------------------------------------------------ #
+
+def _run_validation(
+    model,
+    val_dataloader: DataLoader,
+    config,
+    device: torch.device,
+    max_batches: int = 0,
+) -> dict[str, float]:
+    """Run a no-grad validation pass over ``val_dataloader``.
+
+    Returns averaged metrics: ``val_loss``, ``val_improvement``,
+    ``val_adaptation_benefit``, ``val_baseline_loss``.
+
+    If ``max_batches`` is 0 the entire loader is consumed.
+    """
+    model.eval()
+    chunk_size = config.adapt_every_n
+    improvement_weight = getattr(config, "improvement_weight", 0.1)
+    adapt_problems = getattr(config, "adapt_problems_p1", 5)
+
+    total_loss = 0.0
+    total_improvement = 0.0
+    total_baseline = 0.0
+    total_benefit = 0.0
+    n_batches = 0
+
+    with torch.no_grad():
+        for batch in val_dataloader:
+            if max_batches and n_batches >= max_batches:
+                break
+
+            input_ids = batch["input_ids"].to(device)
+            labels = batch.get("labels")
+            if labels is not None:
+                labels = labels.to(device)
+            problem_spans = batch["problem_spans"]
+
+            batch_size, seq_len = input_ids.shape
+
+            # Normalise spans
+            if problem_spans and isinstance(problem_spans[0], tuple):
+                per_example_spans = [problem_spans] * batch_size
+            else:
+                per_example_spans = problem_spans
+
+            num_problems = max(len(s) for s in per_example_spans)
+            ap = min(adapt_problems, num_problems - 1)
+            eval_spans_raw = [spans[ap:] for spans in per_example_spans]
+
+            eval_start_token = seq_len
+            for spans in eval_spans_raw:
+                if spans:
+                    eval_start_token = min(eval_start_token, spans[0][0] - 1)
+            eval_logits_start_chunk = max(0, eval_start_token // chunk_size)
+            logits_offset = eval_logits_start_chunk * chunk_size
+
+            # ---- Adapted forward ----
+            model.start_session(batch_size)
+            adapted_chunks: list[torch.Tensor] = []
+            nc = 0
+            for cs in range(0, seq_len, chunk_size):
+                ce = min(cs + chunk_size, seq_len)
+                pos_ids = torch.arange(cs, ce, device=device).unsqueeze(0).expand(batch_size, -1)
+                out = model(input_ids[:, cs:ce], position_ids=pos_ids)
+                if nc >= eval_logits_start_chunk:
+                    adapted_chunks.append(out["logits"])
+                _maybe_truncate(model, nc, config)
+                nc += 1
+            adapted_logits = torch.cat(adapted_chunks, dim=1)
+
+            eval_spans = [
+                [(s - logits_offset, e - logits_offset) for s, e in spans]
+                for spans in eval_spans_raw
+            ]
+            loss_t, per_prob, impr_t = compute_episodic_loss(
+                adapted_logits, input_ids[:, logits_offset:],
+                eval_spans, improvement_weight,
+                labels=labels[:, logits_offset:] if labels is not None else None,
+            )
+
+            # ---- Baseline (no adaptation) ----
+            model.start_session(batch_size)
+            baseline_chunks: list[torch.Tensor] = []
+            bnc = 0
+            for cs in range(0, seq_len, chunk_size):
+                ce = min(cs + chunk_size, seq_len)
+                pos_ids = torch.arange(cs, ce, device=device).unsqueeze(0).expand(batch_size, -1)
+                out = model(input_ids[:, cs:ce], position_ids=pos_ids, suppress_adapt=True)
+                if bnc >= eval_logits_start_chunk:
+                    baseline_chunks.append(out["logits"])
+                bnc += 1
+            baseline_logits = torch.cat(baseline_chunks, dim=1)
+            _, bl_per_prob, _ = compute_episodic_loss(
+                baseline_logits, input_ids[:, logits_offset:],
+                eval_spans, 0.0,
+                labels=labels[:, logits_offset:] if labels is not None else None,
+            )
+
+            total_loss += loss_t.item()
+            total_improvement += impr_t.item()
+            bl_val = sum(bl_per_prob) / len(bl_per_prob) if bl_per_prob else 0.0
+            total_baseline += bl_val
+            total_benefit += (bl_val - loss_t.item())
+            n_batches += 1
+
+    model.train()
+
+    if n_batches == 0:
+        return {}
+
+    return {
+        "val_loss": total_loss / n_batches,
+        "val_improvement": total_improvement / n_batches,
+        "val_baseline_loss": total_baseline / n_batches,
+        "val_adaptation_benefit": total_benefit / n_batches,
+    }
+
+
+# ------------------------------------------------------------------ #
+# Single episodic training step                                        #
+# ------------------------------------------------------------------ #
 
 def train_one_episodic_step(
     model,
@@ -254,7 +377,13 @@ def train_one_episodic_step(
         chunk_end = min(chunk_start + chunk_size, seq_len)
         chunk_ids = input_ids[:, chunk_start:chunk_end]
 
-        output = model(chunk_ids)
+        # Absolute position IDs so RoPE embeddings are correct
+        # even though attention is chunk-local.
+        pos_ids = torch.arange(
+            chunk_start, chunk_end, device=device,
+        ).unsqueeze(0).expand(batch_size, -1)
+
+        output = model(chunk_ids, position_ids=pos_ids)
 
         # Only keep logits that overlap with eval spans
         if num_chunks >= eval_logits_start_chunk:
@@ -308,7 +437,10 @@ def train_one_episodic_step(
             for chunk_start in range(0, seq_len, chunk_size):
                 chunk_end = min(chunk_start + chunk_size, seq_len)
                 chunk_ids = input_ids[:, chunk_start:chunk_end]
-                out = model(chunk_ids, suppress_adapt=True)
+                pos_ids = torch.arange(
+                    chunk_start, chunk_end, device=device,
+                ).unsqueeze(0).expand(batch_size, -1)
+                out = model(chunk_ids, position_ids=pos_ids, suppress_adapt=True)
                 if bl_num_chunks >= eval_logits_start_chunk:
                     baseline_chunks.append(out["logits"])
                 bl_num_chunks += 1
@@ -416,11 +548,13 @@ def train_phase1(
     # ---- Data ----
     if dataloader is None:
         tokenizer = getattr(model, "tokenizer", None)
-        dataloader = build_phase1_dataloader(
+        dataloader, val_dataloader = build_phase1_dataloader(
             config,
             tokenizer=tokenizer,
             synthetic=synthetic,
         )
+    else:
+        val_dataloader = None
 
     # ---- W&B ----
     if use_wandb:
@@ -551,6 +685,22 @@ def train_phase1(
                     log_dict["adaptation_benefit"] = metrics["adaptation_benefit"]
                 log_dict.update(model.diagnostics())
                 wandb.log(log_dict)
+
+            # ---- Validation pass ----
+            if val_dataloader is not None:
+                val_metrics = _run_validation(
+                    model, val_dataloader, config, device,
+                    max_batches=20,  # cap to ~20 batches for speed
+                )
+                if val_metrics:
+                    logger.info(
+                        f"  [val] loss={val_metrics['val_loss']:.4f}  "
+                        f"benefit={val_metrics['val_adaptation_benefit']:.4f}  "
+                        f"baseline={val_metrics['val_baseline_loss']:.4f}"
+                    )
+                    if use_wandb:
+                        import wandb
+                        wandb.log({"episode": episode_idx, **val_metrics})
 
             if nan_total > 0:
                 logger.info(f"  NaN episodes so far: {nan_total}")

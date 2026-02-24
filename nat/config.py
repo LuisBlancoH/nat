@@ -43,6 +43,10 @@ class NATConfig:
     max_examples_per_source: int = 10_000  # cap per HF source for fast startup
     dataset_cache_dir: Optional[str] = None  # override ~/.cache/nat/domain_groups
 
+    # Validation
+    val_fraction: float = 0.1   # fraction of context groups held out for val
+    val_episodes: int = 500     # number of validation episodes per eval pass
+
     # Training - Phase 2 (consolidation across domains)
     lr_phase2: float = 1e-4
     num_runs_p2: int = 500

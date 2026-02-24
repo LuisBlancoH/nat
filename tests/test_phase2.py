@@ -198,7 +198,7 @@ class TestEpisodicDataModule:
         assert ds1[0]["problem_spans"] == ds2[0]["problem_spans"]
 
     def test_build_dataloader_synthetic(self, config):
-        dl = build_phase1_dataloader(config, synthetic=True)
+        dl, _ = build_phase1_dataloader(config, synthetic=True)
         batch = next(iter(dl))
         assert batch["input_ids"].shape == (config.batch_size, config.seq_len)
         assert "problem_spans" in batch

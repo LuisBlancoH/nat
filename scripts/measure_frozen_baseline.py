@@ -314,7 +314,7 @@ def main():
     if args.phase == 1:
         logger.info("=== Phase 1 baseline: language modelling ===")
         from nat.training.data import build_phase1_dataloader
-        dl = build_phase1_dataloader(config, tokenizer=tokenizer)
+        dl, _ = build_phase1_dataloader(config, tokenizer=tokenizer)
 
         # Full-sequence loss (entire document, full self-attention)
         stats_full = _measure_lm_loss(

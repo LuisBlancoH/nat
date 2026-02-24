@@ -180,14 +180,15 @@ class TestDataModule:
         assert len(item["problem_spans"]) == config.num_problems_per_episode
 
     def test_build_dataloader_synthetic(self, config):
-        dl = build_phase1_dataloader(config, synthetic=True)
+        dl, val_dl = build_phase1_dataloader(config, synthetic=True)
+        assert val_dl is None  # synthetic → no val split
         batch = next(iter(dl))
         assert batch["input_ids"].shape == (config.batch_size, config.seq_len)
         assert "problem_spans" in batch
 
     def test_dataloader_multiple_batches(self, config):
         config.num_episodes_p1 = 10
-        dl = build_phase1_dataloader(config, synthetic=True)
+        dl, _ = build_phase1_dataloader(config, synthetic=True)
         batches = list(dl)
         # 10 episodes / batch_size 2, drop_last=True → 5 batches
         assert len(batches) == 5
