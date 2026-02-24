@@ -9,7 +9,7 @@ Provides:
 
 Phase 1 data sources (multi-domain with reasoning traces)
 ---------------------------------------------------------
-- camel-ai/math — 50k problems across 25 sub-topics with step-by-step solutions
+- GSM8K — 7.5k grade-school math word problems with step-by-step solutions
 - Hendrycks MATH (EleutherAI) — competition math across 7 subjects
 - MATH-Hard (lighteval) — hard competition math problems
 - OpenR1-Math-220k (open-r1) — competition math with CoT, pre-verified correct answers
@@ -173,7 +173,7 @@ class MultiDomainEpisodeDataset(Dataset):
     into a single tokenised sequence.
 
     Domains:
-      - camel-ai/math      — grouped by sub_topic (~hundreds of exercise types)
+      - GSM8K              — single pool, no-repeat sampling draws 8 distinct problems
       - Hendrycks MATH     — grouped by subject + difficulty level
       - MATH-Hard          — grouped by subject + difficulty level
       - OpenR1-Math-220k   — grouped by problem_type; filtered to verified-correct only
@@ -185,18 +185,19 @@ class MultiDomainEpisodeDataset(Dataset):
     """
 
     SOURCES = [
-        # ── Math: camel-ai/math — 50k problems, 25 sub-topics ──
+        # ── Math: GSM8K — 7.5k grade-school word problems with step-by-step solutions ──
         {
-            "name": "camel-ai/math",
-            "config": None,
+            "name": "gsm8k",
+            "config": "main",
             "domain": "math",
             "split": "train",
             "formatter": lambda ex: (
-                ex.get("message_1", ""),
-                ex.get("message_2", ""),
+                ex.get("question", ""),
+                ex.get("answer", ""),
             ),
-            # sub_topic gives fine-grained groups like "Solving linear equations"
-            "grouper": lambda ex: ex.get("sub_topic", ex.get("topic;", "math")),
+            # Single bucket is fine — no-repeat sampling draws 8 distinct
+            # problems per episode from the full pool.
+            "grouper": lambda ex: "gsm8k",
         },
         # ── Math: Hendrycks MATH (all 7 subjects) ──
         *[
@@ -879,12 +880,12 @@ def build_domain_dataloader(
     DOMAIN_SOURCE_MAP: dict[str, list[dict]] = {
         "math": [
             {
-                "name": "camel-ai/math",
-                "config": None,
+                "name": "gsm8k",
+                "config": "main",
                 "split": "train",
                 "formatter": lambda ex: (
-                    f"Problem: {ex.get('message_1', '')}\n"
-                    f"Solution: {ex.get('message_2', '')}\n\n"
+                    f"Problem: {ex.get('question', '')}\n"
+                    f"Solution: {ex.get('answer', '')}\n\n"
                 ),
             },
             {
