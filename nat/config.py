@@ -21,7 +21,7 @@ class NATConfig:
     d_hidden: int = 512
 
     # Adaptation
-    adapt_every_n: int = 64
+    adapt_every_n: int = 256
     lr_clamp: float = 0.05
     fast_weight_max_norm: float = 8.0
 
@@ -34,7 +34,7 @@ class NATConfig:
     num_episodes_p1: int = 50000
     batch_size: int = 4
     seq_len: int = 2048
-    truncated_bptt: int = 16
+    truncated_bptt: int = 4
     grad_clip: float = 1.0
     weight_decay: float = 0.01
     improvement_weight: float = 0.1

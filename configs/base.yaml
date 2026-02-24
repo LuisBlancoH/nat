@@ -7,7 +7,7 @@ rank: 64
 d_hidden: 512
 
 # Adaptation
-adapt_every_n: 64
+adapt_every_n: 256
 lr_clamp: 0.05
 fast_weight_max_norm: 8.0
 
@@ -20,7 +20,7 @@ lr_phase1: 2e-4
 num_episodes_p1: 50000
 batch_size: 4
 seq_len: 2048
-truncated_bptt: 16
+truncated_bptt: 4
 grad_clip: 1.0
 weight_decay: 0.01
 improvement_weight: 0.1
