@@ -25,25 +25,28 @@ def detach_kv_cache(past_key_values):
     This breaks the gradient path through the KV cache so that
     gradients for θ flow exclusively through the fast-weight updates,
     not through the frozen base-model's attention.
-
-    Works with any ``DynamicCache`` version and legacy tuple-of-tuples.
     """
     if past_key_values is None:
         return None
 
-    try:
-        from transformers.cache_utils import DynamicCache
-    except ImportError:
-        DynamicCache = None
+    # ---- Object with _seen_tokens + list of layer caches ----
+    # Covers DynamicCache across all transformers versions by directly
+    # cloning and detaching internal storage, whatever it's called.
+    if not isinstance(past_key_values, tuple):
+        import copy
+        new = copy.copy(past_key_values)  # shallow copy
 
-    # ---- DynamicCache ----
-    if DynamicCache is not None and isinstance(past_key_values, DynamicCache):
-        new_cache = DynamicCache()
-        for layer_idx in range(len(past_key_values)):
-            k, v = past_key_values[layer_idx]
-            # update(key, value, layer_idx) is the stable public API
-            new_cache.update(k.detach(), v.detach(), layer_idx)
-        return new_cache
+        # Detach any tensor-list attributes we can find
+        for attr in ("key_cache", "value_cache",
+                     "_key_cache", "_value_cache"):
+            lst = getattr(new, attr, None)
+            if lst is not None and isinstance(lst, list):
+                setattr(new, attr, [
+                    t.detach() if hasattr(t, "detach") else t
+                    for t in lst
+                ])
+
+        return new
 
     # ---- Legacy tuple-of-tuples ----
     return tuple(
