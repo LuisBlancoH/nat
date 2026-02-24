@@ -369,6 +369,7 @@ class MultiDomainEpisodeDataset(Dataset):
         cache_dir: str | None = None,
         val_fraction: float = 0.0,
         _preloaded_groups: dict[str, list[list[tuple[str, str]]]] | None = None,
+        _split_label: str | None = None,
     ):
         super().__init__()
         self.tokenizer = tokenizer
@@ -377,6 +378,7 @@ class MultiDomainEpisodeDataset(Dataset):
         self.num_problems = num_problems
         self.max_examples_per_source = max_examples_per_source
         self.val_fraction = val_fraction
+        self._split_label = _split_label
         # Cache directory for serialised domain groups (avoids re-fetching)
         self.cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "nat" / "domain_groups"
 
@@ -432,7 +434,12 @@ class MultiDomainEpisodeDataset(Dataset):
         total_pairs = sum(
             sum(len(g) for g in gs) for gs in self.domain_groups.values()
         )
-        split_label = "train" if self._val_groups or _preloaded_groups is not None else "all"
+        if self._split_label:
+            split_label = self._split_label
+        elif self._val_groups:
+            split_label = "train"
+        else:
+            split_label = "all"
         logger.info(
             f"Phase 1 [{split_label}]: {total_pairs} problem-solution pairs in "
             f"{total_groups} context groups across "
@@ -474,6 +481,7 @@ class MultiDomainEpisodeDataset(Dataset):
             seq_len=self.seq_len,
             num_problems=self.num_problems,
             _preloaded_groups=self._val_groups,
+            _split_label="val",
         )
 
     def _load_sources(self):
