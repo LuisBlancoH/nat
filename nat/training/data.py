@@ -9,11 +9,12 @@ Provides:
 
 Phase 1 data sources (multi-domain with reasoning traces)
 ---------------------------------------------------------
-- AMPS Khan Academy — math exercises with LaTeX solutions
-- MATH (Hendrycks) — competition math with step-by-step proofs
+- GSM8K — grade-school math word problems
+- Hendrycks MATH (EleutherAI) — competition math across 7 subjects
+- MATH-Hard (lighteval) — hard competition math problems
 - CodeForces-CoTs (open-r1) — competitive programming with CoT
-- AR-LSAT — analytical reasoning scenarios (CoT generated)
-- DROP — reading comprehension with discrete reasoning (CoT generated)
+- LexGLUE SCOTUS — US Supreme Court legal opinions
+- DROP — reading comprehension with discrete reasoning
 - ScienceQA — science questions with explanations
 
 Phase 2 uses the same domain datasets for consolidation training.
@@ -172,10 +173,11 @@ class MultiDomainEpisodeDataset(Dataset):
     into a single tokenised sequence.
 
     Domains:
-      - AMPS Khan Academy  — grouped by exercise type (693 types)
-      - MATH (Hendrycks)   — grouped by subject + difficulty level
-      - CodeForces-CoTs    — grouped by algorithm tag
-      - AR-LSAT            — grouped by shared scenario
+      - GSM8K              — grouped as single bucket
+      - Hendrycks MATH     — grouped by subject + difficulty level
+      - MATH-Hard          — grouped by subject + difficulty level
+      - CodeForces-CoTs    — grouped by contest name
+      - LexGLUE SCOTUS     — grouped by label (issue area)
       - DROP               — grouped by shared passage
       - ScienceQA          — grouped by skill category
 
@@ -183,21 +185,40 @@ class MultiDomainEpisodeDataset(Dataset):
     """
 
     SOURCES = [
-        # ── Math: AMPS Khan Academy ──
+        # ── Math: GSM8K (grade-school math) ──
         {
-            "name": "EleutherAI/amps",
-            "config": "khan_academy",
+            "name": "gsm8k",
+            "config": "main",
             "domain": "math",
             "split": "train",
             "formatter": lambda ex: (
-                ex.get("problem", ex.get("question", "")),
-                ex.get("solution", ex.get("answer", "")),
+                ex.get("question", ""),
+                ex.get("answer", ""),
             ),
-            "grouper": lambda ex: ex.get("exercise_type", ex.get("type", "math")),
+            "grouper": lambda ex: "gsm8k",
         },
-        # ── Math (hard): MATH (Hendrycks) ──
+        # ── Math: Hendrycks MATH (all 7 subjects) ──
+        *[
+            {
+                "name": "EleutherAI/hendrycks_math",
+                "config": cfg,
+                "domain": "math",
+                "split": "train",
+                "formatter": lambda ex: (
+                    ex.get("problem", ""),
+                    ex.get("solution", ""),
+                ),
+                "grouper": lambda ex: f"{ex.get('type', 'unknown')}_L{ex.get('level', '?')}",
+            }
+            for cfg in [
+                "algebra", "counting_and_probability", "geometry",
+                "intermediate_algebra", "number_theory",
+                "prealgebra", "precalculus",
+            ]
+        ],
+        # ── Math (hard): lighteval/MATH-Hard ──
         {
-            "name": "hendrycks/competition_math",
+            "name": "lighteval/MATH-Hard",
             "config": None,
             "domain": "math_hard",
             "split": "train",
@@ -214,28 +235,23 @@ class MultiDomainEpisodeDataset(Dataset):
             "domain": "code",
             "split": "train",
             "formatter": lambda ex: (
-                ex.get("problem", ex.get("question", "")),
-                ex.get("solution", ex.get("answer", "")),
+                ex.get("description", ex.get("prompt", "")),
+                ex.get("generation", ex.get("editorial", "")),
             ),
-            # Group by algorithm tag if available, else by difficulty
-            "grouper": lambda ex: (
-                ex.get("tags", [None])[0]
-                if isinstance(ex.get("tags"), list) and ex.get("tags")
-                else ex.get("difficulty", "unknown")
-            ),
+            # Group by contest name
+            "grouper": lambda ex: ex.get("contest_name", "unknown"),
         },
-        # ── Logic: AR-LSAT ──
+        # ── Logic: LexGLUE SCOTUS ──
         {
-            "name": "nguha/legalbench",
-            "config": None,
+            "name": "coastalcph/lex_glue",
+            "config": "scotus",
             "domain": "logic",
             "split": "train",
-            "task_filter": "rule_qa",  # AR-LSAT style analytical reasoning
             "formatter": lambda ex: (
-                ex.get("text", ex.get("question", "")),
-                ex.get("answer", ex.get("label", "")),
+                ex.get("text", ""),
+                str(ex.get("label", "")),
             ),
-            "grouper": lambda ex: ex.get("text", "")[:200],
+            "grouper": lambda ex: str(ex.get("label", "unknown")),
         },
         # ── Reading: DROP ──
         {
@@ -761,18 +777,27 @@ def build_domain_dataloader(
     DOMAIN_SOURCE_MAP: dict[str, list[dict]] = {
         "math": [
             {
-                "name": "EleutherAI/amps",
-                "config": "khan_academy",
+                "name": "gsm8k",
+                "config": "main",
                 "split": "train",
                 "formatter": lambda ex: (
-                    f"Problem: {ex.get('problem', ex.get('question', ''))}\n"
-                    f"Solution: {ex.get('solution', ex.get('answer', ''))}\n\n"
+                    f"Problem: {ex.get('question', '')}\n"
+                    f"Solution: {ex.get('answer', '')}\n\n"
+                ),
+            },
+            {
+                "name": "EleutherAI/hendrycks_math",
+                "config": "algebra",
+                "split": "train",
+                "formatter": lambda ex: (
+                    f"Problem: {ex.get('problem', '')}\n"
+                    f"Solution: {ex.get('solution', '')}\n\n"
                 ),
             },
         ],
         "math_hard": [
             {
-                "name": "hendrycks/competition_math",
+                "name": "lighteval/MATH-Hard",
                 "config": None,
                 "split": "train",
                 "formatter": lambda ex: (
@@ -787,19 +812,19 @@ def build_domain_dataloader(
                 "config": None,
                 "split": "train",
                 "formatter": lambda ex: (
-                    f"Problem: {ex.get('problem', ex.get('question', ''))}\n"
-                    f"Solution: {ex.get('solution', ex.get('answer', ''))}\n\n"
+                    f"Problem: {ex.get('description', ex.get('prompt', ''))}\n"
+                    f"Solution: {ex.get('generation', ex.get('editorial', ''))}\n\n"
                 ),
             },
         ],
         "logic": [
             {
-                "name": "nguha/legalbench",
-                "config": None,
+                "name": "coastalcph/lex_glue",
+                "config": "scotus",
                 "split": "train",
                 "formatter": lambda ex: (
-                    f"Problem: {ex.get('text', ex.get('question', ''))}\n"
-                    f"Answer: {ex.get('answer', ex.get('label', ''))}\n\n"
+                    f"Problem: {ex.get('text', '')}\n"
+                    f"Answer: {str(ex.get('label', ''))}\n\n"
                 ),
             },
         ],
