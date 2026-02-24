@@ -17,7 +17,13 @@ Phase 1 data sources (multi-domain with reasoning traces)
 - DROP — reading comprehension with discrete reasoning
 - ScienceQA — science questions grouped by fine-grained skill (379 skills)
 
-Phase 2 uses the same domain datasets for consolidation training.
+All episodes are formatted using the Qwen3 chat template in non-thinking
+mode (``enable_thinking=False``).  Each problem is a user→assistant turn
+with an empty ``<think>`` block, matching the hidden-state distribution
+the model produces at inference.  NAT's adaptive layers are the sole
+reasoning mechanism — built-in CoT is deliberately suppressed.
+
+Phase 2 uses the same domain datasets and formatting for consolidation.
 
 Synthetic datasets are provided for unit-testing and development.
 """
@@ -371,6 +377,21 @@ class MultiDomainEpisodeDataset(Dataset):
         # Cache directory for serialised domain groups (avoids re-fetching)
         self.cache_dir = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "nat" / "domain_groups"
 
+        # Pre-tokenise the constant parts of the Qwen3 chat template
+        # (non-thinking mode).  Each problem in an episode is formatted as:
+        #   <|im_start|>user\n{q}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n{a}<|im_end|>\n
+        # This matches the hidden-state distribution at inference time.
+        self._chat_prefix = tokenizer.encode(
+            "<|im_start|>user\n", add_special_tokens=False,
+        )  # [151644, 872, 198]
+        self._chat_middle = tokenizer.encode(
+            "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+            add_special_tokens=False,
+        )  # [151645, 198, 151644, 77091, 198, 151667, 271, 151668, 271]
+        self._chat_suffix = tokenizer.encode(
+            "<|im_end|>\n", add_special_tokens=False,
+        )  # [151645, 198]
+
         # domain_groups[domain_name] = list of context groups
         # Each context group is a list of (problem, solution) pairs
         self.domain_groups: dict[str, list[list[tuple[str, str]]]] = {}
@@ -621,8 +642,13 @@ class MultiDomainEpisodeDataset(Dataset):
         all problems in the same domain, which is what the adaptive modules
         need to detect context and improve across the episode.
 
-        Format: plain text, problem + step-by-step solution.
-        No chat template, no <think> tags.
+        Format: Qwen3 chat template, non-thinking mode.
+        Each problem is a user→assistant turn::
+
+            <|im_start|>user\n{q}<|im_end|>\n
+            <|im_start|>assistant\n<think>\n\n</think>\n\n{a}<|im_end|>\n
+
+        This matches the hidden-state distribution at inference time.
         """
         rng = random.Random(idx)
         pad_id = self.tokenizer.eos_token_id or 0
@@ -656,12 +682,13 @@ class MultiDomainEpisodeDataset(Dataset):
         problem_spans: list[tuple[int, int]] = []
 
         for q, a in selected:
-            q_tokens = self.tokenizer.encode(
-                f"Problem: {q}\nSolution: ", add_special_tokens=False,
-            )
-            a_tokens = self.tokenizer.encode(
-                f"{a}\n\n", add_special_tokens=False,
-            )
+            # Prompt: <|im_start|>user\n{q}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n
+            q_content = self.tokenizer.encode(q, add_special_tokens=False)
+            q_tokens = self._chat_prefix + q_content + self._chat_middle
+
+            # Answer: {a}<|im_end|>\n
+            a_content = self.tokenizer.encode(a, add_special_tokens=False)
+            a_tokens = a_content + self._chat_suffix
 
             sol_start = len(all_tokens) + len(q_tokens)
             sol_start = max(sol_start, 1)
@@ -671,7 +698,7 @@ class MultiDomainEpisodeDataset(Dataset):
                 remaining = self.seq_len - len(all_tokens)
                 if remaining > len(q_tokens) + 1:
                     a_budget = remaining - len(q_tokens)
-                    a_tokens = a_tokens[:a_budget]
+                    a_tokens = a_content[:max(a_budget - len(self._chat_suffix), 1)] + self._chat_suffix
                     sol_end = sol_start + len(a_tokens)
                 else:
                     break
@@ -679,6 +706,7 @@ class MultiDomainEpisodeDataset(Dataset):
             all_tokens.extend(q_tokens)
             all_tokens.extend(a_tokens)
 
+            # Mask: only supervise on answer content + im_end suffix
             all_labels.extend([-100] * len(q_tokens))
             all_labels.extend(a_tokens)
 
@@ -902,24 +930,28 @@ def build_domain_dataloader(
     from datasets import load_dataset
 
     # Map domain names to source datasets
+    # Chat-template helper for Phase 2 formatters (non-thinking mode)
+    _CT = (
+        "<|im_start|>user\n{q}<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n{a}<|im_end|>\n"
+    )
+
     DOMAIN_SOURCE_MAP: dict[str, list[dict]] = {
         "math": [
             {
                 "name": "gsm8k",
                 "config": "main",
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"Problem: {ex.get('question', '')}\n"
-                    f"Solution: {ex.get('answer', '')}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=ex.get('question', ''), a=ex.get('answer', ''),
                 ),
             },
             {
                 "name": "EleutherAI/hendrycks_math",
                 "config": "algebra",
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"Problem: {ex.get('problem', '')}\n"
-                    f"Solution: {ex.get('solution', '')}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=ex.get('problem', ''), a=ex.get('solution', ''),
                 ),
             },
         ],
@@ -928,18 +960,16 @@ def build_domain_dataloader(
                 "name": "lighteval/MATH-Hard",
                 "config": None,
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"Problem: {ex.get('problem', '')}\n"
-                    f"Solution: {ex.get('solution', '')}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=ex.get('problem', ''), a=ex.get('solution', ''),
                 ),
             },
             {
                 "name": "open-r1/OpenR1-Math-220k",
                 "config": None,
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"Problem: {ex.get('problem', '')}\n"
-                    f"Solution: {ex.get('solution', '')}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=ex.get('problem', ''), a=ex.get('solution', ''),
                 ),
                 "filter": lambda ex: (ex.get("correctness_count") or 0) > 0,
             },
@@ -949,9 +979,9 @@ def build_domain_dataloader(
                 "name": "open-r1/codeforces-cots",
                 "config": None,
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"Problem: {ex.get('description', ex.get('prompt', ''))}\n"
-                    f"Solution: {ex.get('generation', ex.get('editorial', ''))}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=ex.get('description', ex.get('prompt', '')),
+                    a=ex.get('generation', ex.get('editorial', '')),
                 ),
             },
         ],
@@ -960,10 +990,9 @@ def build_domain_dataloader(
                 "name": "ucinlp/drop",
                 "config": None,
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"Passage: {ex['passage'][:400]}\n"
-                    f"Question: {ex['question']}\n"
-                    f"Answer: {ex['answers_spans']['spans'][0] if ex.get('answers_spans') and ex['answers_spans'].get('spans') else ''}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=f"Based on: \"{ex['passage'][:400]}\"\n{ex['question']}",
+                    a=ex['answers_spans']['spans'][0] if ex.get('answers_spans') and ex['answers_spans'].get('spans') else '',
                 ),
             },
         ],
@@ -972,9 +1001,9 @@ def build_domain_dataloader(
                 "name": "derek-thomas/ScienceQA",
                 "config": None,
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"Question: {ex.get('question', '')}\n"
-                    f"Answer: {ex['choices'][ex['answer']] if isinstance(ex.get('answer'), int) and 0 <= ex['answer'] < len(ex.get('choices', [])) else ''}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=ex.get('question', ''),
+                    a=ex['choices'][ex['answer']] if isinstance(ex.get('answer'), int) and 0 <= ex['answer'] < len(ex.get('choices', [])) else '',
                 ),
             },
         ],

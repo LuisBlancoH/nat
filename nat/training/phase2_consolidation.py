@@ -342,11 +342,20 @@ def build_domain_dataloader(
     # Each domain maps to a LIST of sources — thin domains get extra      #
     # datasets to avoid repeating the same 1 K examples across 100 runs.  #
     # ------------------------------------------------------------------ #
-    _arc_formatter = lambda ex: (
-        f"Question: {ex['question']}\n"
-        f"Choices: {', '.join(ex['choices']['text'])}\n"
-        f"Answer: {ex['choices']['text'][ex['choices']['label'].index(ex['answerKey'])] if ex['answerKey'] in ex['choices']['label'] else ex['choices']['text'][0]}\n\n"
+    # Chat-template helper — non-thinking mode, matches Phase 1 format.
+    # Raw-text domains (code, text) keep plain format since there's no Q/A.
+    _CT = (
+        "<|im_start|>user\n{q}<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n{a}<|im_end|>\n"
     )
+
+    def _arc_fmt(ex):
+        q = ex['question']
+        labels = ex['choices']['label']
+        texts = ex['choices']['text']
+        choices = ', '.join(texts)
+        answer = texts[labels.index(ex['answerKey'])] if ex['answerKey'] in labels else texts[0]
+        return _CT.format(q=f"{q}\nChoices: {choices}", a=answer)
 
     DOMAIN_SOURCES: dict[str, list[dict]] = {
         "math": [
@@ -354,13 +363,17 @@ def build_domain_dataloader(
                 "name": "openai/gsm8k",
                 "config": "main",
                 "split": "train",
-                "formatter": lambda ex: f"Problem: {ex['question']}\nSolution: {ex['answer']}\n\n",
+                "formatter": lambda ex: _CT.format(
+                    q=ex['question'], a=ex['answer'],
+                ),
             },
             {
                 "name": "microsoft/orca-math-word-problems-200k",
                 "config": None,
                 "split": "train",
-                "formatter": lambda ex: f"Problem: {ex['question']}\nSolution: {ex['answer']}\n\n",
+                "formatter": lambda ex: _CT.format(
+                    q=ex['question'], a=ex['answer'],
+                ),
             },
         ],
         "code": [
@@ -375,8 +388,8 @@ def build_domain_dataloader(
                 "name": "sahil2801/CodeAlpaca-20k",
                 "config": None,
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"{ex.get('prompt', '')}\n{ex.get('completion', '')}"
+                "formatter": lambda ex: _CT.format(
+                    q=ex.get('prompt', ''), a=ex.get('completion', ''),
                 ),
             },
         ],
@@ -385,30 +398,30 @@ def build_domain_dataloader(
                 "name": "allenai/ai2_arc",
                 "config": "ARC-Challenge",
                 "split": "train",
-                "formatter": _arc_formatter,
+                "formatter": _arc_fmt,
             },
             {
                 "name": "allenai/ai2_arc",
                 "config": "ARC-Easy",
                 "split": "train",
-                "formatter": _arc_formatter,
+                "formatter": _arc_fmt,
             },
             {
                 "name": "allenai/openbookqa",
                 "config": "main",
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"Question: {ex['question_stem']}\n"
-                    f"Answer: {ex['choices']['text'][ex['choices']['label'].index(ex['answerKey'])] if ex['answerKey'] in ex['choices']['label'] else ex['choices']['text'][0]}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=ex['question_stem'],
+                    a=ex['choices']['text'][ex['choices']['label'].index(ex['answerKey'])] if ex['answerKey'] in ex['choices']['label'] else ex['choices']['text'][0],
                 ),
             },
             {
                 "name": "tau/commonsense_qa",
                 "config": None,
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"Question: {ex['question']}\n"
-                    f"Answer: {ex['choices']['text'][ex['choices']['label'].index(ex['answerKey'])] if ex['answerKey'] in ex['choices']['label'] else ex['choices']['text'][0]}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=ex['question'],
+                    a=ex['choices']['text'][ex['choices']['label'].index(ex['answerKey'])] if ex['answerKey'] in ex['choices']['label'] else ex['choices']['text'][0],
                 ),
             },
         ],
@@ -426,17 +439,16 @@ def build_domain_dataloader(
                 "name": "allenai/sciq",
                 "config": None,
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"Question: {ex['question']}\n"
-                    f"Answer: {ex['correct_answer']}\n"
-                    f"Explanation: {ex['support']}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=ex['question'],
+                    a=f"{ex['correct_answer']}\nExplanation: {ex['support']}",
                 ),
             },
             {
                 "name": "allenai/ai2_arc",
                 "config": "ARC-Challenge",
                 "split": "train",
-                "formatter": _arc_formatter,
+                "formatter": _arc_fmt,
             },
         ],
         "knowledge": [
@@ -444,10 +456,9 @@ def build_domain_dataloader(
                 "name": "cais/mmlu",
                 "config": "all",
                 "split": "test",
-                "formatter": lambda ex: (
-                    f"Subject: {ex.get('subject', 'general')}\n"
-                    f"Question: {ex['question']}\n"
-                    f"Answer: {ex['choices'][ex['answer']] if isinstance(ex['answer'], int) and 0 <= ex['answer'] < len(ex['choices']) else ex['choices'][0]}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=f"Subject: {ex.get('subject', 'general')}\n{ex['question']}",
+                    a=ex['choices'][ex['answer']] if isinstance(ex['answer'], int) and 0 <= ex['answer'] < len(ex['choices']) else ex['choices'][0],
                 ),
             },
         ],
@@ -456,18 +467,18 @@ def build_domain_dataloader(
                 "name": "Rowan/hellaswag",
                 "config": None,
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"{ex['ctx']} "
-                    f"{ex['endings'][int(ex['label'])] if str(ex['label']).isdigit() else ex['endings'][0]}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=ex['ctx'],
+                    a=ex['endings'][int(ex['label'])] if str(ex['label']).isdigit() else ex['endings'][0],
                 ),
             },
             {
                 "name": "ybisk/piqa",
                 "config": None,
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"Goal: {ex['goal']}\n"
-                    f"Solution: {ex['sol1'] if ex['label'] == 0 else ex['sol2']}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=ex['goal'],
+                    a=ex['sol1'] if ex['label'] == 0 else ex['sol2'],
                 ),
             },
         ],
@@ -476,9 +487,9 @@ def build_domain_dataloader(
                 "name": "trivia_qa",
                 "config": "rc.nocontext",
                 "split": "train",
-                "formatter": lambda ex: (
-                    f"Question: {ex['question']}\n"
-                    f"Answer: {ex['answer']['value'] if ex['answer'].get('value') else ex['answer'].get('aliases', [''])[0]}\n\n"
+                "formatter": lambda ex: _CT.format(
+                    q=ex['question'],
+                    a=ex['answer']['value'] if ex['answer'].get('value') else ex['answer'].get('aliases', [''])[0],
                 ),
             },
         ],
