@@ -84,11 +84,6 @@ from torch.utils.data import DataLoader, Dataset
 
 from nat.training.train_utils import save_checkpoint as _save_checkpoint
 
-try:
-    from transformers import DynamicCache
-except ImportError:
-    DynamicCache = None
-
 logger = logging.getLogger(__name__)
 
 
@@ -874,11 +869,6 @@ def train_one_run(
             _partial_reset_differentiable(model, alpha)
 
         model._step_counter = 0
-        # Fresh KV cache per session (each session is a new document)
-        if DynamicCache is not None:
-            model._kv_cache = DynamicCache()
-        else:
-            model._kv_cache = None
 
         # ---- Fetch domain data ----
         if domain not in domain_iters:
@@ -897,7 +887,10 @@ def train_one_run(
         for chunk_start in range(0, seq_len, chunk_size):
             chunk_end = min(chunk_start + chunk_size, seq_len)
             chunk_ids = input_ids[:, chunk_start:chunk_end]
-            output = model(chunk_ids)
+            pos_ids = torch.arange(
+                chunk_start, chunk_end, device=device,
+            ).unsqueeze(0).expand(chunk_ids.shape[0], -1)
+            output = model(chunk_ids, position_ids=pos_ids)
             session_logits.append(output["logits"])
 
         all_logits = torch.cat(session_logits, dim=1)
