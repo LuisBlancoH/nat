@@ -409,7 +409,6 @@ def train_one_episodic_step(
 
     all_logits_chunks: list[torch.Tensor] = []
 
-    past_kv = None  # KV cache carried across chunks
     for chunk_start in range(0, seq_len, chunk_size):
         chunk_end = min(chunk_start + chunk_size, seq_len)
         chunk_ids = input_ids[:, chunk_start:chunk_end]
@@ -419,14 +418,7 @@ def train_one_episodic_step(
             chunk_start, chunk_end, device=device,
         ).unsqueeze(0).expand(batch_size, -1)
 
-        output = model(
-            chunk_ids, position_ids=pos_ids,
-            past_key_values=past_kv, use_cache=True,
-        )
-
-        # Carry KV cache forward (detached: gradients for θ flow
-        # through fast weights only, not through frozen-model KV).
-        past_kv = _detach_kv_cache(output.get("past_key_values"))
+        output = model(chunk_ids, position_ids=pos_ids)
 
         # Only keep logits that overlap with eval spans
         if num_chunks >= eval_logits_start_chunk:
@@ -464,31 +456,23 @@ def train_one_episodic_step(
         saved_do_adapt = model._do_adapt
         saved_adapt_cell = model._adapt_cell[0]
 
-        # Free KV cache before baseline to reduce peak memory
-        past_kv = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         with torch.no_grad():
-            # Fresh session — reset fast weights + KV cache
+            # Fresh session — reset fast weights
             model.start_session(batch_size)
 
             # Only collect logits for eval portion (same optimisation)
             baseline_chunks: list[torch.Tensor] = []
             bl_num_chunks = 0
-            bl_past_kv = None
             for chunk_start in range(0, seq_len, chunk_size):
                 chunk_end = min(chunk_start + chunk_size, seq_len)
                 chunk_ids = input_ids[:, chunk_start:chunk_end]
                 pos_ids = torch.arange(
                     chunk_start, chunk_end, device=device,
                 ).unsqueeze(0).expand(batch_size, -1)
-                out = model(
-                    chunk_ids, position_ids=pos_ids,
-                    past_key_values=bl_past_kv, use_cache=True,
-                    suppress_adapt=True,
-                )
-                bl_past_kv = out.get("past_key_values")
+                out = model(chunk_ids, position_ids=pos_ids, suppress_adapt=True)
                 if bl_num_chunks >= eval_logits_start_chunk:
                     baseline_chunks.append(out["logits"])
                 bl_num_chunks += 1
