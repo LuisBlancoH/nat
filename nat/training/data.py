@@ -333,12 +333,14 @@ class MultiDomainEpisodeDataset(Dataset):
         num_episodes: int = 50000,
         seq_len: int = 2048,
         num_problems: int = 8,
+        max_examples_per_source: int = 10_000,
     ):
         super().__init__()
         self.tokenizer = tokenizer
         self.num_episodes = num_episodes
         self.seq_len = seq_len
         self.num_problems = num_problems
+        self.max_examples_per_source = max_examples_per_source
 
         # domain_groups[domain_name] = list of context groups
         # Each context group is a list of (problem, solution) pairs
@@ -385,6 +387,7 @@ class MultiDomainEpisodeDataset(Dataset):
                 ds = load_dataset(
                     src["name"],
                     split=src["split"],
+                    streaming=True,
                     **load_kwargs,
                 )
 
@@ -394,7 +397,9 @@ class MultiDomainEpisodeDataset(Dataset):
                 filt = src.get("filter")  # optional predicate
 
                 groups_dict: dict[str, list[tuple[str, str]]] = {}
-                for example in ds:
+                for n_seen, example in enumerate(ds):
+                    if n_seen >= self.max_examples_per_source:
+                        break
                     try:
                         if filt is not None and not filt(example):
                             continue
@@ -756,6 +761,7 @@ def build_phase1_dataloader(
         num_episodes=getattr(config, "num_episodes_p1", 50000),
         seq_len=config.seq_len,
         num_problems=num_problems,
+        max_examples_per_source=getattr(config, "max_examples_per_source", 10_000),
     )
 
     return DataLoader(
