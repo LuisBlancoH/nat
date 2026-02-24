@@ -124,6 +124,13 @@ def compute_episodic_loss(
             if prob_idx >= len(per_example_spans[b]):
                 continue
             sol_start, sol_end = per_example_spans[b][prob_idx]
+            # Clamp to tensor bounds — prevents shape mismatch when
+            # a span overshoots seq_len (boundary clipping asymmetry)
+            seq_T = logits.shape[1]
+            sol_start = max(sol_start, 1)
+            sol_end = min(sol_end, seq_T)
+            if sol_end <= sol_start:
+                continue
             sol_logits = logits[b, sol_start - 1 : sol_end - 1, :]
             sol_labels = targets[b, sol_start:sol_end]
 

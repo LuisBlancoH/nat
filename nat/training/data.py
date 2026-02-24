@@ -760,7 +760,7 @@ class MultiDomainEpisodeDataset(Dataset):
                 remaining = self.seq_len - len(all_tokens)
                 if remaining > len(q_tokens) + 1:
                     a_budget = remaining - len(q_tokens)
-                    a_tokens = a_content[:max(a_budget - len(self._chat_suffix), 1)] + self._chat_suffix
+                    a_tokens = (a_content[:max(a_budget - len(self._chat_suffix), 1)] + self._chat_suffix)[:a_budget]
                     sol_end = sol_start + len(a_tokens)
                 else:
                     break
