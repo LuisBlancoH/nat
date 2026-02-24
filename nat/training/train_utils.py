@@ -26,8 +26,7 @@ def detach_kv_cache(past_key_values):
     gradients for θ flow exclusively through the fast-weight updates,
     not through the frozen base-model's attention.
 
-    Works with ``DynamicCache`` (any transformers version) and legacy
-    tuple-of-tuples.
+    Works with any ``DynamicCache`` version and legacy tuple-of-tuples.
     """
     if past_key_values is None:
         return None
@@ -37,27 +36,20 @@ def detach_kv_cache(past_key_values):
     except ImportError:
         DynamicCache = None
 
-    # ---- DynamicCache: convert → detach → reconstruct ----
+    # ---- DynamicCache ----
     if DynamicCache is not None and isinstance(past_key_values, DynamicCache):
-        # to_legacy_cache() → tuple of (key, value) per layer
-        legacy = past_key_values.to_legacy_cache()
-        detached = tuple(
-            (k.detach(), v.detach()) for k, v in legacy
-        )
-        return DynamicCache.from_legacy_cache(detached)
+        new_cache = DynamicCache()
+        for layer_idx in range(len(past_key_values)):
+            k, v = past_key_values[layer_idx]
+            # update(key, value, layer_idx) is the stable public API
+            new_cache.update(k.detach(), v.detach(), layer_idx)
+        return new_cache
 
     # ---- Legacy tuple-of-tuples ----
-    detached = tuple(
+    return tuple(
         tuple(t.detach() if t is not None else None for t in layer_kv)
         for layer_kv in past_key_values
     )
-    # Wrap into DynamicCache if available so .get_seq_length() works
-    if DynamicCache is not None:
-        try:
-            return DynamicCache.from_legacy_cache(detached)
-        except Exception:
-            pass
-    return detached
 
 
 # ------------------------------------------------------------------ #
