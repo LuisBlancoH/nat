@@ -30,7 +30,7 @@ class NATConfig:
     session_reset_alpha: float = 0.5
 
     # Training - Phase 1 (episodic multi-domain meta-learning)
-    lr_phase1: float = 5e-4
+    lr_phase1: float = 1e-3
     num_episodes_p1: int = 50000
     batch_size: int = 4
     seq_len: int = 2048
