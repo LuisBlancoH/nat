@@ -143,6 +143,7 @@ class NATModel(nn.Module):
         self.adapt_every_n = config.adapt_every_n
         self._step_counter = 0
         self._do_adapt = True  # toggled by training loop
+        self._adapt_cell: list[bool] = [True]  # stable per-forward cell for hooks
 
         # -------------------------------------------------------------- #
         # Register hooks on base model layers                              #
@@ -246,22 +247,30 @@ class NATModel(nn.Module):
 
         The hook returns the EXACT same tuple format as the original
         layer output.
+
+        NOTE: hooks read ``self._adapt_cell[0]`` rather than
+        ``self._do_adapt`` directly.  ``_adapt_cell`` is a 1-element list
+        set once at the start of each forward() call and never mutated
+        again during that call (including gradient-checkpoint recompute),
+        so both the original pass and the recomputation see the same flag.
         """
         layers = self._layers
 
         def make_adaptive_hook(adaptive_layer):
             def hook(module, input, output):
+                # Read from the stable per-forward cell, not self._do_adapt
+                do_adapt = self._adapt_cell[0]
                 # output is a tuple: (hidden_states, ...) or just a tensor
                 if isinstance(output, tuple):
                     hidden = output[0]
                     base_dtype = hidden.dtype
                     h_float = hidden.float()
-                    h_float = adaptive_layer(h_float, do_adapt=self._do_adapt)
+                    h_float = adaptive_layer(h_float, do_adapt=do_adapt)
                     return (h_float.to(base_dtype),) + output[1:]
                 else:
                     base_dtype = output.dtype
                     h_float = output.float()
-                    h_float = adaptive_layer(h_float, do_adapt=self._do_adapt)
+                    h_float = adaptive_layer(h_float, do_adapt=do_adapt)
                     return h_float.to(base_dtype)
             return hook
 
@@ -380,13 +389,16 @@ class NATModel(nn.Module):
         if self.adaptive_A.fast_A is None:
             self.start_session(batch_size)
 
-        # Update step counter & determine whether to adapt
-        saved_do_adapt = self._do_adapt
-        self._do_adapt = (
+        # Update step counter & determine whether to adapt.
+        # IMPORTANT: compute do_adapt from the counter BEFORE incrementing,
+        # then freeze it in _adapt_cell so gradient-checkpoint recomputation
+        # sees the exact same flag as the original forward pass.
+        do_adapt = (
             not suppress_adapt
             and (self._step_counter % self.adapt_every_n) < seq_len
         )
-        self._step_counter += seq_len
+        self._do_adapt = do_adapt
+        self._adapt_cell[0] = do_adapt  # hooks read this, never mutate it
 
         # Delegate to base model — hooks handle adaptive/consolidation
         base_kwargs: dict[str, Any] = {
@@ -398,8 +410,8 @@ class NATModel(nn.Module):
 
         output = self.base_model(**base_kwargs)
 
-        # Restore do_adapt flag
-        self._do_adapt = saved_do_adapt
+        # Increment counter AFTER the forward (and after any recompute)
+        self._step_counter += seq_len
 
         # Extract logits
         if hasattr(output, "logits"):
