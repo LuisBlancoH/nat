@@ -521,10 +521,17 @@ class MultiDomainEpisodeDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, Any]:
         """Build one episode: num_problems related problems packed densely.
 
-        Two-level sampling:
-        1. Pick a domain uniformly (balances domain representation)
-        2. Pick a context group within that domain
-        3. Draw all problems from that group
+        Sampling strategy (no within-episode duplicates):
+        1. Pick a domain uniformly (balances domain representation).
+        2. Pick a primary context group within that domain.
+        3. Shuffle the primary group and take as many problems as it has.
+        4. If more problems are needed, spill into other groups from the
+           same domain (each shuffled, no repeats across groups either)
+           until num_problems is reached or the domain is exhausted.
+
+        This ensures every problem in an episode is unique while keeping
+        all problems in the same domain, which is what the adaptive modules
+        need to detect context and improve across the episode.
 
         Format: plain text, problem + step-by-step solution.
         No chat template, no <think> tags.
@@ -535,8 +542,26 @@ class MultiDomainEpisodeDataset(Dataset):
         # Pick a domain uniformly
         domain = rng.choice(list(self.domain_groups.keys()))
         domain_grps = self.domain_groups[domain]
-        group = rng.choice(domain_grps)
-        selected = [rng.choice(group) for _ in range(self.num_problems)]
+
+        # Pick primary group; shuffle remaining groups for spillover
+        primary_idx = rng.randrange(len(domain_grps))
+        primary_group = list(domain_grps[primary_idx])
+        rng.shuffle(primary_group)
+
+        other_groups = [
+            list(g) for i, g in enumerate(domain_grps) if i != primary_idx
+        ]
+        rng.shuffle(other_groups)
+
+        # Fill episode without repeats: primary group first, then spillover
+        pool: list[tuple[str, str]] = primary_group
+        for g in other_groups:
+            if len(pool) >= self.num_problems:
+                break
+            rng.shuffle(g)
+            pool = pool + g
+
+        selected = pool[: self.num_problems]
 
         all_tokens: list[int] = []
         all_labels: list[int] = []
