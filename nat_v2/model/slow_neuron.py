@@ -2,7 +2,7 @@
 SlowNeuron — nested adaptive neuron for NAT v2.
 
 Fires every 16 chunks. Accumulates reports from both fast neurons,
-runs the 5-step internal pipeline (observe → write → read → project →
+runs the internal pipeline (observe → read → surprise → write → project →
 proj_write), then produces two outputs:
 
   A. Context vector — shapes all fast neuron decisions until next firing
@@ -153,7 +153,6 @@ class SlowNeuron(nn.Module):
         self.W_down_mod = None
         self.W_up_mod = None
         self.prev_h_avg = None
-        self.prev_mem_read = None
         self.report_buffer: List[torch.Tensor] = []
         self.adapt_mode = True
 
@@ -163,7 +162,6 @@ class SlowNeuron(nn.Module):
         self.W_down_mod = torch.zeros(batch_size, self.d_model, self.d_proj, device=device)
         self.W_up_mod = torch.zeros(batch_size, self.d_proj, self.d_model, device=device)
         self.prev_h_avg = None
-        self.prev_mem_read = None
         self.report_buffer = []
 
     def detach_state(self):
@@ -176,8 +174,6 @@ class SlowNeuron(nn.Module):
             self.W_up_mod = self.W_up_mod.detach()
         if self.prev_h_avg is not None:
             self.prev_h_avg = self.prev_h_avg.detach()
-        if self.prev_mem_read is not None:
-            self.prev_mem_read = self.prev_mem_read.detach()
         self.report_buffer = [r.detach() for r in self.report_buffer]
 
     def accumulate_report(self, report: torch.Tensor):
@@ -219,40 +215,12 @@ class SlowNeuron(nn.Module):
         context = self.default_context.unsqueeze(0).expand(batch_size, -1)
 
         # ==============================================================
-        # Step 1: OBSERVE — memory-based surprise
+        # Step 1: OBSERVE
         # ==============================================================
-        prev_read = torch.zeros_like(h_avg) if self.prev_mem_read is None else self.prev_mem_read
-        error = h_avg - prev_read
-        surprise = self.surprise_net(
-            torch.cat([error, context], dim=-1)
-        )                                                              # (batch, 1)
-
         self.prev_h_avg = h_avg.detach()
 
         # ==============================================================
-        # Step 2: MEMORY WRITE (adapt mode only)
-        # ==============================================================
-        if self.adapt_mode:
-            write_input = torch.cat([h_avg, surprise, context], dim=-1)
-            key = self.write_key_net(write_input)                      # (batch, rank)
-            value = self.write_value_net(write_input)                  # (batch, d_model)
-
-            lr = self.lr_net(torch.cat([surprise, context], dim=-1))
-            lr = torch.clamp(lr, max=0.1)                             # (batch, 1)
-
-            self.mem_A = self.mem_A + lr.unsqueeze(-1) * torch.bmm(
-                value.unsqueeze(2), key.unsqueeze(1)
-            )
-
-            norm = torch.norm(self.mem_A, dim=(1, 2), keepdim=True)
-            self.mem_A = self.mem_A * torch.where(
-                norm > self.max_norm,
-                self.max_norm / (norm + 1e-8),
-                torch.ones_like(norm),
-            )
-
-        # ==============================================================
-        # Step 3: MEMORY READ (Attention)
+        # Step 2: MEMORY READ — probe memory before deciding what to write
         # ==============================================================
         slots = self.mem_A.transpose(1, 2)                             # (batch, rank, d_model)
 
@@ -274,11 +242,38 @@ class SlowNeuron(nn.Module):
         mem_read_compressed = torch.bmm(attn_weights, values).squeeze(1)
         mem_read = self.value_up_proj(mem_read_compressed)             # (batch, d_model)
 
-        # Save mem_read for next firing's surprise signal
-        self.prev_mem_read = mem_read.detach()
+        # ==============================================================
+        # Step 3: SURPRISE — same-timestep memory adequacy signal
+        # ==============================================================
+        error = h_avg - mem_read
+        surprise = self.surprise_net(
+            torch.cat([error, context], dim=-1)
+        )                                                              # (batch, 1)
 
         # ==============================================================
-        # Step 4: PROJECTION (bottleneck with residual)
+        # Step 4: MEMORY WRITE (adapt mode only, gated by surprise)
+        # ==============================================================
+        if self.adapt_mode:
+            write_input = torch.cat([h_avg, surprise, context], dim=-1)
+            key = self.write_key_net(write_input)                      # (batch, rank)
+            value = self.write_value_net(write_input)                  # (batch, d_model)
+
+            lr = self.lr_net(torch.cat([surprise, context], dim=-1))
+            lr = torch.clamp(lr, max=0.1)                             # (batch, 1)
+
+            self.mem_A = self.mem_A + lr.unsqueeze(-1) * torch.bmm(
+                value.unsqueeze(2), key.unsqueeze(1)
+            )
+
+            norm = torch.norm(self.mem_A, dim=(1, 2), keepdim=True)
+            self.mem_A = self.mem_A * torch.where(
+                norm > self.max_norm,
+                self.max_norm / (norm + 1e-8),
+                torch.ones_like(norm),
+            )
+
+        # ==============================================================
+        # Step 5: PROJECTION (bottleneck with residual)
         # ==============================================================
         W_down_eff = self.W_down_base.unsqueeze(0) + self.W_down_mod
         W_up_eff = self.W_up_base.unsqueeze(0) + self.W_up_mod
@@ -290,7 +285,7 @@ class SlowNeuron(nn.Module):
         slow_output = mem_read + projected                             # (batch, d_model)
 
         # ==============================================================
-        # Step 5: PROJECTION WRITE (adapt mode, surprise > threshold)
+        # Step 6: PROJECTION WRITE (adapt mode, surprise > threshold)
         # ==============================================================
         if self.adapt_mode:
             threshold = self.threshold_net(context)
