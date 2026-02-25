@@ -191,6 +191,18 @@ class NATv2Model(nn.Module):
     # State management
     # ==================================================================
 
+    def start_window(self, batch_size: int, device: torch.device):
+        """Reset fast neuron memory for new window. W_mod, slow neuron, context persist."""
+        self.fast_neuron_A.start_window(batch_size, device)
+        self.fast_neuron_B.start_window(batch_size, device)
+        # chunk_counter NOT reset — cumulative for slow neuron firing
+
+    def detach_all_state(self):
+        """Detach all persistent state (Phase 2 window boundary)."""
+        self.fast_neuron_A.detach_state()
+        self.fast_neuron_B.detach_state()
+        self.slow_neuron.detach_state()
+
     def start_session(self, batch_size: int, device: torch.device):
         """
         Reset fast neuron state for a new session/window.

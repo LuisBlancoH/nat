@@ -166,6 +166,21 @@ class FastNeuron(nn.Module):
         self.prev_h_avg = None
         self.context = torch.zeros(batch_size, self.d_context, device=device)
 
+    def start_window(self, batch_size: int, device: torch.device):
+        """Reset memory for new window. W_mod and context persist (Phase 2)."""
+        self.mem_A = torch.zeros(batch_size, self.d_model, self.rank, device=device)
+        self.prev_h_avg = None
+        # W_down_mod, W_up_mod, context NOT reset
+
+    def detach_state(self):
+        """Detach persistent state from computation graph (Phase 2 window boundary)."""
+        if self.W_down_mod is not None:
+            self.W_down_mod = self.W_down_mod.detach()
+        if self.W_up_mod is not None:
+            self.W_up_mod = self.W_up_mod.detach()
+        if self.context is not None:
+            self.context = self.context.detach()
+
     def forward(self, h: torch.Tensor, chunk_idx=None) -> torch.Tensor:
         """
         Full 7-step pipeline.
@@ -280,7 +295,7 @@ class FastNeuron(nn.Module):
             torch.bmm(mem_read.unsqueeze(1), W_down_eff).squeeze(1)
         )                                                              # (batch, d_proj)
         projected = torch.bmm(down.unsqueeze(1), W_up_eff).squeeze(1) # (batch, d_model)
-        output = 0.5 * mem_read + projected                           # (batch, d_model)
+        output = mem_read + projected                                   # (batch, d_model)
 
         # ================================================================
         # Step 5: PROJECTION WRITE (adapt mode, skip chunk 0, soft threshold)

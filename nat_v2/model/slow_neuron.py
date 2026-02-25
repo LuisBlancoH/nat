@@ -167,6 +167,18 @@ class SlowNeuron(nn.Module):
         self.prev_h_avg = None
         self.report_buffer = []
 
+    def detach_state(self):
+        """Detach all persistent state from computation graph (Phase 2 window boundary)."""
+        if self.mem_A is not None:
+            self.mem_A = self.mem_A.detach()
+        if self.W_down_mod is not None:
+            self.W_down_mod = self.W_down_mod.detach()
+        if self.W_up_mod is not None:
+            self.W_up_mod = self.W_up_mod.detach()
+        if self.prev_h_avg is not None:
+            self.prev_h_avg = self.prev_h_avg.detach()
+        self.report_buffer = [r.detach() for r in self.report_buffer]
+
     def accumulate_report(self, report: torch.Tensor):
         """
         Append a combined report to the buffer.
@@ -330,11 +342,12 @@ class SlowNeuron(nn.Module):
             consol_raw = self.consolidation_write_nets[i](consol_input)
 
             # Split into pattern/address pairs (fast neuron dimensions)
-            d_pat  = consol_raw[:, :self.fast_d_model]
-            d_addr = consol_raw[:, self.fast_d_model : self.fast_d_model + self.fast_d_proj]
-            u_pat  = consol_raw[:, self.fast_d_model + self.fast_d_proj
-                                 : self.fast_d_model + 2 * self.fast_d_proj]
-            u_addr = consol_raw[:, self.fast_d_model + 2 * self.fast_d_proj :]
+            # L2-normalize to prevent explosion (same fix as fast neuron proj writes)
+            d_pat  = F.normalize(consol_raw[:, :self.fast_d_model], dim=-1)
+            d_addr = F.normalize(consol_raw[:, self.fast_d_model : self.fast_d_model + self.fast_d_proj], dim=-1)
+            u_pat  = F.normalize(consol_raw[:, self.fast_d_model + self.fast_d_proj
+                                 : self.fast_d_model + 2 * self.fast_d_proj], dim=-1)
+            u_addr = F.normalize(consol_raw[:, self.fast_d_model + 2 * self.fast_d_proj :], dim=-1)
 
             # Rank-1 outer product writes (= not +=)
             fast_neuron.W_down_mod = fast_neuron.W_down_mod + (

@@ -241,6 +241,84 @@ class EpisodeDataset:
         verify_ds.topics = verify_topics
         return verify_ds
 
+    def sample_phase2_batch(
+        self,
+        batch_size: int,
+        windows_A: int = 8,
+        windows_B: int = 5,
+        window_len: int = 2048,
+    ) -> Dict[str, object]:
+        """
+        Sample a Phase 2 batch: two distinct topics per batch item,
+        arranged as domain A (5 windows) → domain B (5 windows) → domain A (3 windows).
+
+        Args:
+            batch_size: number of items in batch
+            windows_A: total windows from domain A (5 early + 3 late)
+            windows_B: windows from domain B
+            window_len: tokens per window
+
+        Returns:
+            dict with:
+                'windows': list of 13 (batch, window_len) LongTensors
+                'domain_labels': list of 13 'A'/'B' strings
+        """
+        tokens_needed_A = windows_A * window_len
+        tokens_needed_B = windows_B * window_len
+
+        # Filter topics that have enough tokens for each role
+        eligible_A = [i for i, t in enumerate(self.topics) if len(t.tokens) >= tokens_needed_A]
+        eligible_B = [i for i, t in enumerate(self.topics) if len(t.tokens) >= tokens_needed_B]
+
+        if len(eligible_A) < 2 or len(eligible_B) < 2:
+            raise ValueError(
+                f"Need >= 2 eligible topics for each domain. "
+                f"A-eligible ({tokens_needed_A} tokens): {len(eligible_A)}, "
+                f"B-eligible ({tokens_needed_B} tokens): {len(eligible_B)}"
+            )
+
+        # Domain structure: A*5 + B*5 + A*3 = 13 windows
+        domain_labels = ['A'] * 5 + ['B'] * 5 + ['A'] * 3
+
+        all_windows = [[] for _ in range(13)]
+
+        for _ in range(batch_size):
+            # Pick 2 distinct topics
+            idx_A = random.choice(eligible_A)
+            # Ensure B is different from A
+            eligible_B_filtered = [i for i in eligible_B if i != idx_A]
+            if not eligible_B_filtered:
+                eligible_B_filtered = eligible_B
+            idx_B = random.choice(eligible_B_filtered)
+
+            tokens_A = self.topics[idx_A].tokens
+            tokens_B = self.topics[idx_B].tokens
+
+            # Sample contiguous region from each topic
+            start_A = random.randint(0, len(tokens_A) - tokens_needed_A)
+            start_B = random.randint(0, len(tokens_B) - tokens_needed_B)
+
+            # Slice windows
+            a_offset = 0
+            b_offset = 0
+            for w_idx, label in enumerate(domain_labels):
+                if label == 'A':
+                    s = start_A + a_offset
+                    all_windows[w_idx].append(tokens_A[s : s + window_len])
+                    a_offset += window_len
+                else:
+                    s = start_B + b_offset
+                    all_windows[w_idx].append(tokens_B[s : s + window_len])
+                    b_offset += window_len
+
+        # Stack into tensors
+        windows = [torch.stack(w) for w in all_windows]  # list of (batch, window_len)
+
+        return {
+            'windows': windows,
+            'domain_labels': domain_labels,
+        }
+
     @property
     def num_topics(self) -> int:
         return len(self.topics)
