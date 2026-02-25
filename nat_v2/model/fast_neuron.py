@@ -298,12 +298,12 @@ class FastNeuron(nn.Module):
                 [h_avg, surprise, mem_read, self.context], dim=-1
             )
             raw_down = self.proj_write_down_net(proj_write_input)
-            d_pat  = raw_down[:, :self.d_model]
-            d_addr = raw_down[:, self.d_model:]
+            d_pat  = F.normalize(raw_down[:, :self.d_model], dim=-1)
+            d_addr = F.normalize(raw_down[:, self.d_model:], dim=-1)
 
             raw_up = self.proj_write_up_net(proj_write_input)
-            u_pat  = raw_up[:, :self.d_proj]
-            u_addr = raw_up[:, self.d_proj:]
+            u_pat  = F.normalize(raw_up[:, :self.d_proj], dim=-1)
+            u_addr = F.normalize(raw_up[:, self.d_proj:], dim=-1)
 
             proj_lr = self.proj_lr_net(
                 torch.cat([surprise, self.context], dim=-1)
