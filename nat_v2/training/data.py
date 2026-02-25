@@ -276,40 +276,51 @@ def _load_math_topics(tokenizer) -> Dict[str, Tensor]:
 
 
 def _load_deepmind_math_topics(
-    tokenizer, max_per_config: int = 5000,
+    tokenizer,
+    max_per_split: int = 50_000,
+    chunk_size: int = 2000,
 ) -> Dict[str, Tensor]:
     """
-    Load DeepMind math_dataset, one topic per config name.
+    Load DeepMind math via parquet re-upload, grouped into sub-topics.
+
+    The original deepmind/math_dataset uses a legacy loading script
+    that no longer works. This loads from a parquet re-upload and
+    chunks each difficulty split into sub-topics.
 
     Format: Q: {question}\nA: {answer}\n\n
     """
-    from datasets import get_dataset_config_names, load_dataset
+    from datasets import load_dataset
 
-    configs = get_dataset_config_names("deepmind/math_dataset")
-    print(f"    DeepMind Math: {len(configs)} configs")
+    splits = ["train-easy", "train-medium", "train-hard"]
+    print(f"    DeepMind Math (parquet): {len(splits)} splits")
 
     result = {}
-    for config_name in configs:
+    for split_name in splits:
         try:
             ds = load_dataset(
-                "deepmind/math_dataset", config_name, split="train",
+                "midwestern-simulation/that-one-google-math-dataset",
+                split=split_name,
             )
-            # Limit examples per config
-            if len(ds) > max_per_config:
-                ds = ds.select(range(max_per_config))
+            if len(ds) > max_per_split:
+                ds = ds.shuffle(seed=42).select(range(max_per_split))
 
-            texts = [
-                f"Q: {row['question']}\nA: {row['answer']}"
-                for row in ds
-            ]
-            tokens = _tokenize_texts(tokenizer, texts)
-            result[config_name] = tokens
+            texts = [f"Q: {row['q']}\nA: {row['a']}" for row in ds]
+
+            # Chunk into sub-topics for diversity
+            for i in range(0, len(texts), chunk_size):
+                chunk = texts[i : i + chunk_size]
+                if len(chunk) < chunk_size // 2:
+                    break  # skip small trailing chunk
+                topic_key = f"{split_name}_{i // chunk_size:03d}"
+                tokens = _tokenize_texts(tokenizer, chunk)
+                result[topic_key] = tokens
+
             print(
-                f"    {config_name}: {len(texts)} examples, "
-                f"{len(tokens):,} tokens"
+                f"    {split_name}: {len(texts)} examples → "
+                f"{sum(1 for k in result if k.startswith(split_name))} sub-topics"
             )
         except Exception as e:
-            print(f"    Skipping {config_name}: {e}")
+            print(f"    Skipping {split_name}: {e}")
             continue
 
     return result
