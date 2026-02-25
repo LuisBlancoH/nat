@@ -99,6 +99,10 @@ class EpisodeDataset:
             ("gsm8k", "gsm8k_topics.pt", _load_gsm8k_topics),
             ("arc", "arc_topics.pt", _load_arc_topics),
             ("openbookqa", "openbookqa_topics.pt", _load_openbookqa_topics),
+            ("mmlu", "mmlu_topics.pt", _load_mmlu_topics),
+            ("aqua_rat", "aqua_rat_topics.pt", _load_aqua_rat_topics),
+            ("logiqa", "logiqa_topics.pt", _load_logiqa_topics),
+            ("commonsenseqa", "commonsenseqa_topics.pt", _load_commonsenseqa_topics),
         ]
 
         for dataset_name, cache_name, loader_fn in loaders:
@@ -529,4 +533,162 @@ def _load_openbookqa_topics(tokenizer) -> Dict[str, Tensor]:
     # Single topic — all OpenBookQA together
     result = {"openbookqa_all": tokens}
     print(f"    OpenBookQA: {len(texts)} questions, {len(tokens):,} tokens")
+    return result
+
+
+def _load_mmlu_topics(tokenizer) -> Dict[str, Tensor]:
+    """
+    Load MMLU, one topic per subject (57 subjects).
+
+    Format: Q: {question}\n{choices}\nA: {answer}\n\n
+    """
+    from datasets import load_dataset
+
+    ds = load_dataset("cais/mmlu", "all", split="auxiliary_train")
+
+    groups: Dict[str, List[str]] = {}
+    for row in ds:
+        subject = row.get("subject", "unknown")
+        choices = row.get("choices", [])
+        choices_fmt = "\n".join(
+            f"  ({chr(65 + i)}) {c}" for i, c in enumerate(choices)
+        )
+        answer_idx = row.get("answer", 0)
+        answer_letter = chr(65 + answer_idx)
+        answer_text = answer_letter
+        if answer_idx < len(choices):
+            answer_text = f"{answer_letter}: {choices[answer_idx]}"
+
+        text = f"Q: {row['question']}\n{choices_fmt}\nA: {answer_text}"
+        groups.setdefault(subject, []).append(text)
+
+    result = {}
+    for subject, texts in groups.items():
+        tokens = _tokenize_texts(tokenizer, texts)
+        result[subject] = tokens
+
+    print(
+        f"    MMLU: {len(result)} subjects, "
+        f"{sum(len(t) for t in result.values()):,} tokens"
+    )
+    return result
+
+
+def _load_aqua_rat_topics(
+    tokenizer, chunk_size: int = 5000,
+) -> Dict[str, Tensor]:
+    """
+    Load AQuA-RAT (algebraic word problems with rationales), chunked into sub-topics.
+
+    Format: Q: {question}\n{options}\nA: {correct}\nRationale: {rationale}\n\n
+    """
+    from datasets import load_dataset
+
+    ds = load_dataset("deepmind/aqua_rat", "raw", split="train")
+
+    texts = []
+    for row in ds:
+        options = row.get("options", [])
+        options_fmt = "\n".join(f"  {o}" for o in options)
+        texts.append(
+            f"Q: {row['question']}\n{options_fmt}\n"
+            f"A: {row['correct']}\nRationale: {row.get('rationale', '')}"
+        )
+
+    result = {}
+    for i in range(0, len(texts), chunk_size):
+        chunk = texts[i : i + chunk_size]
+        if len(chunk) < chunk_size // 2:
+            break
+        topic_key = f"aqua_rat_{i // chunk_size:03d}"
+        tokens = _tokenize_texts(tokenizer, chunk)
+        result[topic_key] = tokens
+
+    print(f"    AQuA-RAT: {len(texts)} problems → {len(result)} sub-topics")
+    return result
+
+
+def _load_logiqa_topics(tokenizer) -> Dict[str, Tensor]:
+    """
+    Load LogiQA (logical reasoning).
+
+    Format: Context: {context}\nQ: {query}\n{options}\nA: {correct}\n\n
+    """
+    from datasets import load_dataset
+
+    ds = load_dataset("lucasmccabe/logiqa", split="train")
+
+    texts = []
+    for row in ds:
+        options = row.get("options", [])
+        options_fmt = "\n".join(
+            f"  ({chr(65 + i)}) {o}" for i, o in enumerate(options)
+        )
+        correct_idx = row.get("correct_option", 0)
+        answer_letter = chr(65 + correct_idx)
+        answer_text = answer_letter
+        if correct_idx < len(options):
+            answer_text = f"{answer_letter}: {options[correct_idx]}"
+
+        texts.append(
+            f"Context: {row.get('context', '')}\n"
+            f"Q: {row.get('query', '')}\n{options_fmt}\nA: {answer_text}"
+        )
+
+    tokens = _tokenize_texts(tokenizer, texts)
+    result = {"logiqa_all": tokens}
+    print(f"    LogiQA: {len(texts)} questions, {len(tokens):,} tokens")
+    return result
+
+
+def _load_commonsenseqa_topics(
+    tokenizer, min_examples: int = 5,
+) -> Dict[str, Tensor]:
+    """
+    Load CommonsenseQA, grouped by question_concept.
+
+    Format: Q: {question}\n{choices}\nA: {answer}\n\n
+    """
+    from datasets import load_dataset
+
+    ds = load_dataset("tau/commonsense_qa", split="train")
+
+    groups: Dict[str, List[str]] = {}
+    for row in ds:
+        concept = row.get("question_concept", "unknown")
+        choices = row.get("choices", {})
+        labels = choices.get("label", [])
+        choice_texts = choices.get("text", [])
+        choices_fmt = "\n".join(
+            f"  ({l}) {t}" for l, t in zip(labels, choice_texts)
+        )
+        answer_key = row.get("answerKey", "")
+        answer_text = answer_key
+        if answer_key in labels:
+            idx = labels.index(answer_key)
+            if idx < len(choice_texts):
+                answer_text = f"{answer_key}: {choice_texts[idx]}"
+
+        text = f"Q: {row['question']}\n{choices_fmt}\nA: {answer_text}"
+        groups.setdefault(concept, []).append(text)
+
+    # Filter concepts with too few examples, merge small ones
+    result = {}
+    small_texts: List[str] = []
+    for concept, texts in groups.items():
+        if len(texts) < min_examples:
+            small_texts.extend(texts)
+        else:
+            tokens = _tokenize_texts(tokenizer, texts)
+            result[concept] = tokens
+
+    # Merge small concepts into one topic
+    if small_texts:
+        tokens = _tokenize_texts(tokenizer, small_texts)
+        result["misc_concepts"] = tokens
+
+    print(
+        f"    CommonsenseQA: {len(groups)} concepts → {len(result)} topics "
+        f"({len(small_texts)} examples merged into misc)"
+    )
     return result
