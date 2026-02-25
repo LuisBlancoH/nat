@@ -101,7 +101,7 @@ class EpisodeDataset:
             ("openbookqa", "openbookqa_topics.pt", _load_openbookqa_topics),
             ("mmlu", "mmlu_topics.pt", _load_mmlu_topics),
             ("aqua_rat", "aqua_rat_topics.pt", _load_aqua_rat_topics),
-            ("logiqa", "logiqa_topics.pt", _load_logiqa_topics),
+            # logiqa skipped: uses legacy dataset script incompatible with datasets 4.0+
             ("commonsenseqa", "commonsenseqa_topics.pt", _load_commonsenseqa_topics),
         ]
 
