@@ -244,11 +244,7 @@ def _load_deepmind_math_topics(
 
     Format: Q: {question}\nA: {answer}\n\n
     """
-    import os
     from datasets import get_dataset_config_names, load_dataset
-
-    # Legacy dataset script requires opt-in; env var works across all versions
-    os.environ["HF_DATASETS_TRUST_REMOTE_CODE"] = "1"
 
     configs = get_dataset_config_names("deepmind/math_dataset")
     print(f"    DeepMind Math: {len(configs)} configs")
