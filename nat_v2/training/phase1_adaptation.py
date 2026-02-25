@@ -135,15 +135,49 @@ def create_verification_set(dataset, config, output_dir, device):
     return verify_ids
 
 
-def run_verification_eval(model, verify_ids, config, device):
+def compute_frozen_baseline_losses(model, verify_ids, config, device):
+    """
+    Compute frozen baseline losses for fixed verification episodes.
+
+    Run once and cache — frozen model never changes.
+    Returns list of per-batch-chunk loss floats.
+    """
+    chunk_size = config.chunk_size
+    num_adapt = config.num_adapt_chunks
+    num_chunks = config.num_chunks
+    batch_size = config.batch_size
+
+    baseline_losses = []
+    model.remove_hooks()
+    for start_idx in range(0, verify_ids.shape[0], batch_size):
+        end_idx = min(start_idx + batch_size, verify_ids.shape[0])
+        batch_ids = verify_ids[start_idx:end_idx].to(device)
+
+        for chunk_idx in range(num_adapt, num_chunks):
+            c_start = chunk_idx * chunk_size
+            c_end = c_start + chunk_size
+            chunk_ids = batch_ids[:, c_start:c_end]
+
+            with torch.no_grad():
+                outputs = model.base_model(
+                    input_ids=chunk_ids, use_cache=False,
+                )
+            loss = compute_loss(outputs.logits, chunk_ids)
+            baseline_losses.append(loss.item())
+            del outputs
+    model.register_hooks()
+    return baseline_losses
+
+
+def run_verification_eval(model, verify_ids, config, device, cached_baseline_loss=None):
     """
     Compare NAT v2 vs frozen baseline on fixed verification episodes.
 
-    For each episode:
-      - NAT: reset state, run full episode (adapt + eval), record eval loss
-      - Baseline: remove hooks, run only eval chunks, record loss, re-register hooks
+    Args:
+        cached_baseline_loss: pre-computed frozen baseline mean loss.
+            If None, computes it (slower).
 
-    Returns dict of verify/* metrics.
+    Returns (dict of verify/* metrics, baseline_loss for caching).
     """
     num_episodes = verify_ids.shape[0]
     chunk_size = config.chunk_size
@@ -152,7 +186,6 @@ def run_verification_eval(model, verify_ids, config, device):
     batch_size = config.batch_size
 
     nat_eval_losses = []
-    baseline_eval_losses = []
 
     for start_idx in range(0, num_episodes, batch_size):
         end_idx = min(start_idx + batch_size, num_episodes)
@@ -175,33 +208,26 @@ def run_verification_eval(model, verify_ids, config, device):
                 nat_eval_losses.append(loss.item())
             del outputs
 
-        # ---- Frozen baseline (eval chunks only, hooks fully removed) ----
-        model.remove_hooks()
-        for chunk_idx in range(num_adapt, num_chunks):
-            c_start = chunk_idx * chunk_size
-            c_end = c_start + chunk_size
-            chunk_ids = batch_ids[:, c_start:c_end]
-
-            with torch.no_grad():
-                outputs = model.base_model(
-                    input_ids=chunk_ids, use_cache=False,
-                )
-            loss = compute_loss(outputs.logits, chunk_ids)
-            baseline_eval_losses.append(loss.item())
-            del outputs
-        model.register_hooks()
+    # Frozen baseline: use cached value or compute
+    if cached_baseline_loss is None:
+        baseline_losses = compute_frozen_baseline_losses(
+            model, verify_ids, config, device,
+        )
+        baseline_loss = sum(baseline_losses) / len(baseline_losses)
+    else:
+        baseline_loss = cached_baseline_loss
 
     nat_loss = sum(nat_eval_losses) / len(nat_eval_losses)
-    baseline_loss = sum(baseline_eval_losses) / len(baseline_eval_losses)
     improvement = baseline_loss - nat_loss
     improvement_pct = (improvement / baseline_loss * 100) if baseline_loss > 0 else 0.0
 
-    return {
+    metrics = {
         "verify/nat_eval_loss": nat_loss,
         "verify/baseline_eval_loss": baseline_loss,
         "verify/improvement": improvement,
         "verify/improvement_pct": improvement_pct,
     }
+    return metrics, baseline_loss
 
 
 def train_phase1(
@@ -286,6 +312,7 @@ def train_phase1(
 
     # ---- Verification set ----
     verify_ids = None
+    cached_baseline_loss = None
     if config.verify_episodes > 0:
         verify_ids = create_verification_set(
             dataset, config, config.output_dir, device,
@@ -577,8 +604,9 @@ def train_phase1(
             and config.verify_interval > 0
             and episode % config.verify_interval == 0
         ):
-            verify_metrics = run_verification_eval(
+            verify_metrics, cached_baseline_loss = run_verification_eval(
                 model, verify_ids, config, device,
+                cached_baseline_loss=cached_baseline_loss,
             )
             print(
                 f"  Verify: NAT={verify_metrics['verify/nat_eval_loss']:.4f}, "
