@@ -166,7 +166,6 @@ def test_gradient_flow():
 
     critical_prefixes = [
         "default_context",
-        "state_predictor",
         "surprise_net",
         "write_key_net",
         "write_value_net",

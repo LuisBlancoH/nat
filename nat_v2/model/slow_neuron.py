@@ -63,11 +63,8 @@ class SlowNeuron(nn.Module):
         # ==============================================================
 
         # ---- Step 1: OBSERVE ----
-        self.state_predictor = nn.Sequential(
-            nn.Linear(d_model_slow + d_context, d_hidden),
-            nn.GELU(),
-            nn.Linear(d_hidden, d_model_slow),
-        )
+        # Memory-based surprise: error = h_avg - prev_mem_read
+        # Same fix as FastNeuron — prevents state_predictor collapse.
         self.surprise_net = nn.Sequential(
             nn.Linear(d_model_slow + d_context, d_hidden),
             nn.GELU(),
@@ -156,6 +153,7 @@ class SlowNeuron(nn.Module):
         self.W_down_mod = None
         self.W_up_mod = None
         self.prev_h_avg = None
+        self.prev_mem_read = None
         self.report_buffer: List[torch.Tensor] = []
         self.adapt_mode = True
 
@@ -165,6 +163,7 @@ class SlowNeuron(nn.Module):
         self.W_down_mod = torch.zeros(batch_size, self.d_model, self.d_proj, device=device)
         self.W_up_mod = torch.zeros(batch_size, self.d_proj, self.d_model, device=device)
         self.prev_h_avg = None
+        self.prev_mem_read = None
         self.report_buffer = []
 
     def detach_state(self):
@@ -177,6 +176,8 @@ class SlowNeuron(nn.Module):
             self.W_up_mod = self.W_up_mod.detach()
         if self.prev_h_avg is not None:
             self.prev_h_avg = self.prev_h_avg.detach()
+        if self.prev_mem_read is not None:
+            self.prev_mem_read = self.prev_mem_read.detach()
         self.report_buffer = [r.detach() for r in self.report_buffer]
 
     def accumulate_report(self, report: torch.Tensor):
@@ -218,13 +219,10 @@ class SlowNeuron(nn.Module):
         context = self.default_context.unsqueeze(0).expand(batch_size, -1)
 
         # ==============================================================
-        # Step 1: OBSERVE
+        # Step 1: OBSERVE — memory-based surprise
         # ==============================================================
-        prev = torch.zeros_like(h_avg) if self.prev_h_avg is None else self.prev_h_avg
-        predicted_h = self.state_predictor(
-            torch.cat([prev, context], dim=-1)
-        )
-        error = h_avg - predicted_h
+        prev_read = torch.zeros_like(h_avg) if self.prev_mem_read is None else self.prev_mem_read
+        error = h_avg - prev_read
         surprise = self.surprise_net(
             torch.cat([error, context], dim=-1)
         )                                                              # (batch, 1)
@@ -275,6 +273,9 @@ class SlowNeuron(nn.Module):
 
         mem_read_compressed = torch.bmm(attn_weights, values).squeeze(1)
         mem_read = self.value_up_proj(mem_read_compressed)             # (batch, d_model)
+
+        # Save mem_read for next firing's surprise signal
+        self.prev_mem_read = mem_read.detach()
 
         # ==============================================================
         # Step 4: PROJECTION (bottleneck with residual)

@@ -271,6 +271,7 @@ class NATv2Model(nn.Module):
             "W_down_mod": self.slow_neuron.W_down_mod,
             "W_up_mod": self.slow_neuron.W_up_mod,
             "prev_h_avg": self.slow_neuron.prev_h_avg,
+            "prev_mem_read": self.slow_neuron.prev_mem_read,
             "report_buffer": torch.stack(rb) if rb else torch.empty(0),
         }
         state["chunk_counter"] = self.chunk_counter
@@ -289,8 +290,8 @@ class NATv2Model(nn.Module):
                 setattr(neuron, attr, state[name].get(attr, None))
 
         slow_s = state["slow"]
-        for attr in ["mem_A", "W_down_mod", "W_up_mod", "prev_h_avg"]:
-            setattr(self.slow_neuron, attr, slow_s[attr])
+        for attr in ["mem_A", "W_down_mod", "W_up_mod", "prev_h_avg", "prev_mem_read"]:
+            setattr(self.slow_neuron, attr, slow_s.get(attr, None))
 
         rb = slow_s["report_buffer"]
         if rb.numel() > 0:
