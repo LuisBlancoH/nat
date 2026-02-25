@@ -246,7 +246,9 @@ def _load_deepmind_math_topics(
     """
     from datasets import get_dataset_config_names, load_dataset
 
-    configs = get_dataset_config_names("deepmind/math_dataset")
+    configs = get_dataset_config_names(
+        "deepmind/math_dataset", trust_remote_code=True,
+    )
     print(f"    DeepMind Math: {len(configs)} configs")
 
     result = {}
@@ -254,6 +256,7 @@ def _load_deepmind_math_topics(
         try:
             ds = load_dataset(
                 "deepmind/math_dataset", config_name, split="train",
+                trust_remote_code=True,
             )
             # Limit examples per config
             if len(ds) > max_per_config:
