@@ -37,7 +37,6 @@ class SlowNeuron(nn.Module):
         d_proj: int = 64,
         d_context: int = 128,        # output context size (shared with fast neurons)
         d_hidden: int = 192,
-        max_norm: float = 10.0,
         fast_d_model: int = 2560,    # fast neuron d_model for consolidation writes
         fast_d_proj: int = 128,      # fast neuron d_proj for consolidation writes
         num_fast_neurons: int = 2,
@@ -50,7 +49,6 @@ class SlowNeuron(nn.Module):
         self.d_proj = d_proj
         self.d_context = d_context
         self.d_hidden = d_hidden
-        self.max_norm = max_norm
         self.fast_d_model = fast_d_model
         self.fast_d_proj = fast_d_proj
         self.num_fast_neurons = num_fast_neurons
@@ -263,13 +261,6 @@ class SlowNeuron(nn.Module):
 
             self.mem_A = self.mem_A + lr.unsqueeze(-1) * torch.bmm(
                 value.unsqueeze(2), key.unsqueeze(1)
-            )
-
-            norm = torch.norm(self.mem_A, dim=(1, 2), keepdim=True)
-            self.mem_A = self.mem_A * torch.where(
-                norm > self.max_norm,
-                self.max_norm / (norm + 1e-8),
-                torch.ones_like(norm),
             )
 
         # ==============================================================

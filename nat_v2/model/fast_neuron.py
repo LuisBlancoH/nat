@@ -37,8 +37,6 @@ class FastNeuron(nn.Module):
         d_context: int = 128,
         d_report: int = 128,
         d_hidden: int = 384,
-        max_norm: float = 30.0,
-        state_decay: float = 0.95,
     ):
         super().__init__()
         self.d_model = d_model
@@ -49,8 +47,6 @@ class FastNeuron(nn.Module):
         self.d_context = d_context
         self.d_report = d_report
         self.d_hidden = d_hidden
-        self.max_norm = max_norm
-        self.state_decay = state_decay
 
         # ---- Step 1: OBSERVE ----
         # Memory-based surprise: error = h_avg - prev_mem_read
@@ -267,17 +263,9 @@ class FastNeuron(nn.Module):
             lr = self.lr_net(torch.cat([surprise, self.context], dim=-1))
             lr = torch.clamp(lr, max=0.1)                             # (batch, 1)
 
-            self.mem_A = self.state_decay * self.mem_A + lr.unsqueeze(-1) * torch.bmm(
+            self.mem_A = self.mem_A + lr.unsqueeze(-1) * torch.bmm(
                 value.unsqueeze(2), key.unsqueeze(1)
             )                                                          # (batch, d_model, rank)
-
-            # Norm clamp for stability
-            norm = torch.norm(self.mem_A, dim=(1, 2), keepdim=True)
-            self.mem_A = self.mem_A * torch.where(
-                norm > self.max_norm,
-                self.max_norm / (norm + 1e-8),
-                torch.ones_like(norm),
-            )
 
         # ================================================================
         # Early exit: passthrough when memory had no content for read.
@@ -331,28 +319,15 @@ class FastNeuron(nn.Module):
             )
             proj_lr = torch.clamp(proj_lr, max=0.1)                   # (batch, 1)
 
-            self.W_down_mod = self.state_decay * self.W_down_mod + (
+            self.W_down_mod = self.W_down_mod + (
                 write_strength.unsqueeze(-1) * proj_lr.unsqueeze(-1)
                 * torch.bmm(d_pat.unsqueeze(2), d_addr.unsqueeze(1))
             )                                                          # (batch, d_model, d_proj)
 
-            self.W_up_mod = self.state_decay * self.W_up_mod + (
+            self.W_up_mod = self.W_up_mod + (
                 write_strength.unsqueeze(-1) * proj_lr.unsqueeze(-1)
                 * torch.bmm(u_pat.unsqueeze(2), u_addr.unsqueeze(1))
             )                                                          # (batch, d_proj, d_model)
-
-            # Norm clamp W_mod for stability (same as mem_A)
-            for W_mod, attr in [
-                (self.W_down_mod, "W_down_mod"),
-                (self.W_up_mod, "W_up_mod"),
-            ]:
-                norm = torch.norm(W_mod, dim=(1, 2), keepdim=True)
-                clamped = W_mod * torch.where(
-                    norm > self.max_norm,
-                    self.max_norm / (norm + 1e-8),
-                    torch.ones_like(norm),
-                )
-                setattr(self, attr, clamped)
 
         # ================================================================
         # Step 7: GATE AND INJECT
