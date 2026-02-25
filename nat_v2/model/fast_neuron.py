@@ -38,6 +38,7 @@ class FastNeuron(nn.Module):
         d_report: int = 128,
         d_hidden: int = 384,
         w_mod_decay: float = 0.95,
+        max_mem_norm: float = 30.0,
     ):
         super().__init__()
         self.d_model = d_model
@@ -49,6 +50,7 @@ class FastNeuron(nn.Module):
         self.d_report = d_report
         self.d_hidden = d_hidden
         self.w_mod_decay = w_mod_decay
+        self.max_mem_norm = max_mem_norm
 
         # ---- Step 1: OBSERVE ----
         # Memory-based surprise: error = h_avg - prev_mem_read
@@ -61,6 +63,8 @@ class FastNeuron(nn.Module):
             nn.Linear(d_hidden, 1),
             nn.Sigmoid(),
         )
+        # Start at sigmoid(0) = 0.5 so surprise is meaningful from the start
+        nn.init.constant_(self.surprise_net[-2].bias, 0.0)
 
         # ---- Step 2: MEMORY WRITE ----
         write_in = d_model + 1 + d_context
@@ -103,7 +107,7 @@ class FastNeuron(nn.Module):
             nn.Linear(d_context, 1),
             nn.Sigmoid(),
         )
-        self.fixed_threshold: float | None = 0.0
+        self.fixed_threshold: float | None = 0.5
         proj_write_in = d_model + 1 + d_model + d_context
         self.proj_write_down_net = nn.Sequential(
             nn.Linear(proj_write_in, d_hidden),
@@ -268,6 +272,11 @@ class FastNeuron(nn.Module):
             self.mem_A = self.mem_A + lr.unsqueeze(-1) * torch.bmm(
                 value.unsqueeze(2), key.unsqueeze(1)
             )                                                          # (batch, d_model, rank)
+
+            # Norm clamp: prevent unbounded memory growth → surprise saturation
+            mem_norm = torch.norm(self.mem_A, dim=(1, 2), keepdim=True)  # (batch, 1, 1)
+            scale = torch.clamp(self.max_mem_norm / (mem_norm + 1e-8), max=1.0)
+            self.mem_A = self.mem_A * scale
 
         # ================================================================
         # Early exit: passthrough when memory had no content for read.

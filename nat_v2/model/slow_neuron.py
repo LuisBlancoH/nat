@@ -40,8 +40,10 @@ class SlowNeuron(nn.Module):
         fast_d_model: int = 2560,    # fast neuron d_model for consolidation writes
         fast_d_proj: int = 128,      # fast neuron d_proj for consolidation writes
         num_fast_neurons: int = 2,
+        max_mem_norm: float = 30.0,
     ):
         super().__init__()
+        self.max_mem_norm = max_mem_norm
         self.d_model = d_model_slow
         self.rank = rank
         self.d_query = d_query
@@ -69,6 +71,8 @@ class SlowNeuron(nn.Module):
             nn.Linear(d_hidden, 1),
             nn.Sigmoid(),
         )
+        # Start at sigmoid(0) = 0.5 so surprise is meaningful from the start
+        nn.init.constant_(self.surprise_net[-2].bias, 0.0)
 
         # ---- Step 2: MEMORY WRITE ----
         write_in = d_model_slow + 1 + d_context
@@ -262,6 +266,11 @@ class SlowNeuron(nn.Module):
             self.mem_A = self.mem_A + lr.unsqueeze(-1) * torch.bmm(
                 value.unsqueeze(2), key.unsqueeze(1)
             )
+
+            # Norm clamp: prevent unbounded memory growth
+            mem_norm = torch.norm(self.mem_A, dim=(1, 2), keepdim=True)
+            scale = torch.clamp(self.max_mem_norm / (mem_norm + 1e-8), max=1.0)
+            self.mem_A = self.mem_A * scale
 
         # ==============================================================
         # Step 5: PROJECTION (bottleneck with residual)
