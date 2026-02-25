@@ -110,11 +110,14 @@ def frozen_baseline_eval(model, input_ids, chunk_size):
     return losses
 
 
-def create_verification_set(dataset, config, output_dir, device):
+def create_verification_set(verify_dataset, config, output_dir, device):
     """
-    Create or load a fixed verification set of episodes.
+    Create or load a fixed verification set from held-out topics.
 
-    Returns (verify_ids, seq_len) where verify_ids is (N, seq_len) LongTensor.
+    Args:
+        verify_dataset: EpisodeDataset containing only held-out topics.
+
+    Returns verify_ids: (N, seq_len) LongTensor.
     Saved to output_dir/verify_episodes.pt for reuse across resumes.
     """
     verify_path = Path(output_dir) / "verify_episodes.pt"
@@ -125,13 +128,13 @@ def create_verification_set(dataset, config, output_dir, device):
 
     episodes = []
     for _ in range(config.verify_episodes):
-        ids, _ = dataset.sample_batch(1)
+        ids, _ = verify_dataset.sample_batch(1)
         episodes.append(ids.squeeze(0))
     verify_ids = torch.stack(episodes)  # (N, seq_len)
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     torch.save(verify_ids, verify_path)
-    print(f"Created verification set: {verify_ids.shape[0]} episodes, saved to {verify_path}")
+    print(f"Created verification set: {verify_ids.shape[0]} episodes from held-out topics, saved to {verify_path}")
     return verify_ids
 
 
@@ -310,12 +313,13 @@ def train_phase1(
         except ImportError:
             print("Warning: wandb not installed, skipping wandb logging")
 
-    # ---- Verification set ----
+    # ---- Verification set (held-out topics) ----
     verify_ids = None
     cached_baseline_loss = None
     if config.verify_episodes > 0:
+        verify_dataset = dataset.split_topics()
         verify_ids = create_verification_set(
-            dataset, config, config.output_dir, device,
+            verify_dataset, config, config.output_dir, device,
         )
 
     # ---- Resume from checkpoint ----

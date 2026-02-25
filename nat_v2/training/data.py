@@ -195,6 +195,45 @@ class EpisodeDataset:
 
         return torch.stack(episodes), topic_indices
 
+    def split_topics(
+        self, held_out_fraction: float = 0.13, seed: int = 42,
+    ) -> "EpisodeDataset":
+        """
+        Hold out a fraction of topics for verification.
+
+        Removes held-out topics from self and returns a new EpisodeDataset
+        containing only those topics. Split is deterministic (seeded).
+
+        Args:
+            held_out_fraction: fraction of topics to hold out.
+            seed: random seed for reproducible split.
+
+        Returns:
+            verify_dataset: EpisodeDataset with held-out topics only.
+        """
+        rng = random.Random(seed)
+        indices = list(range(len(self.topics)))
+        rng.shuffle(indices)
+
+        n_held_out = max(1, int(len(indices) * held_out_fraction))
+        held_out_idx = set(indices[:n_held_out])
+
+        train_topics = [t for i, t in enumerate(self.topics) if i not in held_out_idx]
+        verify_topics = [t for i, t in enumerate(self.topics) if i in held_out_idx]
+
+        # Update self in-place to only contain train topics
+        self.topics = train_topics
+        print(
+            f"Topic split: {len(train_topics)} train, "
+            f"{len(verify_topics)} verify (held-out)"
+        )
+
+        # Return new dataset with held-out topics (skip filtering, already filtered)
+        verify_ds = EpisodeDataset.__new__(EpisodeDataset)
+        verify_ds.seq_len = self.seq_len
+        verify_ds.topics = verify_topics
+        return verify_ds
+
     @property
     def num_topics(self) -> int:
         return len(self.topics)
