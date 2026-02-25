@@ -96,6 +96,9 @@ class EpisodeDataset:
             ("deepmind_math", "deepmind_math_topics.pt", _load_deepmind_math_topics),
             ("scienceqa", "scienceqa_topics.pt", _load_scienceqa_topics),
             ("drop", "drop_topics.pt", _load_drop_topics),
+            ("gsm8k", "gsm8k_topics.pt", _load_gsm8k_topics),
+            ("arc", "arc_topics.pt", _load_arc_topics),
+            ("openbookqa", "openbookqa_topics.pt", _load_openbookqa_topics),
         ]
 
         for dataset_name, cache_name, loader_fn in loaders:
@@ -420,4 +423,110 @@ def _load_drop_topics(tokenizer) -> Dict[str, Tensor]:
         result[section_id] = tokens
 
     print(f"    DROP: {len(result)} sections")
+    return result
+
+
+def _load_gsm8k_topics(
+    tokenizer, chunk_size: int = 500,
+) -> Dict[str, Tensor]:
+    """
+    Load GSM8K (grade school math word problems), chunked into sub-topics.
+
+    Format: Q: {question}\nA: {answer}\n\n
+    """
+    from datasets import load_dataset
+
+    ds = load_dataset("openai/gsm8k", "main", split="train")
+
+    texts = [f"Q: {row['question']}\nA: {row['answer']}" for row in ds]
+
+    result = {}
+    for i in range(0, len(texts), chunk_size):
+        chunk = texts[i : i + chunk_size]
+        if len(chunk) < chunk_size // 2:
+            break
+        topic_key = f"gsm8k_{i // chunk_size:03d}"
+        tokens = _tokenize_texts(tokenizer, chunk)
+        result[topic_key] = tokens
+
+    print(f"    GSM8K: {len(texts)} problems → {len(result)} sub-topics")
+    return result
+
+
+def _load_arc_topics(tokenizer) -> Dict[str, Tensor]:
+    """
+    Load ARC (AI2 Reasoning Challenge), one topic per config+split.
+
+    Format: Q: {question}\n{choices}\nA: {answer}\n\n
+    """
+    from datasets import load_dataset
+
+    result = {}
+    for config in ["ARC-Challenge", "ARC-Easy"]:
+        try:
+            ds = load_dataset("allenai/ai2_arc", config, split="train")
+
+            texts = []
+            for row in ds:
+                choices = row.get("choices", {})
+                labels = choices.get("label", [])
+                choice_texts = choices.get("text", [])
+                choices_fmt = "\n".join(
+                    f"  ({l}) {t}" for l, t in zip(labels, choice_texts)
+                )
+                answer_key = row.get("answerKey", "")
+                # Find answer text
+                answer_text = answer_key
+                if answer_key in labels:
+                    idx = labels.index(answer_key)
+                    if idx < len(choice_texts):
+                        answer_text = f"{answer_key}: {choice_texts[idx]}"
+
+                texts.append(
+                    f"Q: {row['question']}\n{choices_fmt}\nA: {answer_text}"
+                )
+
+            tokens = _tokenize_texts(tokenizer, texts)
+            result[config] = tokens
+            print(f"    {config}: {len(texts)} questions, {len(tokens):,} tokens")
+        except Exception as e:
+            print(f"    Skipping {config}: {e}")
+
+    return result
+
+
+def _load_openbookqa_topics(tokenizer) -> Dict[str, Tensor]:
+    """
+    Load OpenBookQA with fact1 context.
+
+    Format: Fact: {fact1}\nQ: {question}\n{choices}\nA: {answer}\n\n
+    """
+    from datasets import load_dataset
+
+    ds = load_dataset("allenai/openbookqa", "additional", split="train")
+
+    texts = []
+    for row in ds:
+        choices = row.get("choices", {})
+        labels = choices.get("label", [])
+        choice_texts = choices.get("text", [])
+        choices_fmt = "\n".join(
+            f"  ({l}) {t}" for l, t in zip(labels, choice_texts)
+        )
+        answer_key = row.get("answerKey", "")
+        answer_text = answer_key
+        if answer_key in labels:
+            idx = labels.index(answer_key)
+            if idx < len(choice_texts):
+                answer_text = f"{answer_key}: {choice_texts[idx]}"
+
+        fact = row.get("fact1", "")
+        texts.append(
+            f"Fact: {fact}\nQ: {row['question_stem']}\n{choices_fmt}\nA: {answer_text}"
+        )
+
+    tokens = _tokenize_texts(tokenizer, texts)
+    # Single topic — all OpenBookQA together
+    result = {"openbookqa_all": tokens}
+    print(f"    OpenBookQA: {len(texts)} questions, {len(tokens):,} tokens")
     return result
