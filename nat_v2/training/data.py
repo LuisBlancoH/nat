@@ -538,34 +538,52 @@ def _load_mmlu_topics(tokenizer) -> Dict[str, Tensor]:
     Load MMLU, one topic per subject (57 subjects).
 
     Format: Q: {question}\n{choices}\nA: {answer}\n\n
+
+    Note: We load each of the 57 subject configs individually rather than
+    using the "all" config with "auxiliary_train" split, because the
+    auxiliary_train split has an empty subject field for all rows (causing
+    everything to group into 1 topic). The per-subject configs have
+    test/validation/dev splits with proper subject attribution.
     """
-    from datasets import load_dataset
+    from datasets import load_dataset, get_dataset_config_names
 
-    ds = load_dataset("cais/mmlu", "all", split="auxiliary_train")
-
-    groups: Dict[str, List[str]] = {}
-    for row in ds:
-        subject = row.get("subject", "unknown")
-        choices = row.get("choices", [])
-        choices_fmt = "\n".join(
-            f"  ({chr(65 + i)}) {c}" for i, c in enumerate(choices)
-        )
-        answer_idx = row.get("answer", 0)
-        answer_letter = chr(65 + answer_idx)
-        answer_text = answer_letter
-        if answer_idx < len(choices):
-            answer_text = f"{answer_letter}: {choices[answer_idx]}"
-
-        text = f"Q: {row['question']}\n{choices_fmt}\nA: {answer_text}"
-        groups.setdefault(subject, []).append(text)
+    # Get all subject configs (excludes "all" and "auxiliary_train")
+    all_configs = get_dataset_config_names("cais/mmlu")
+    subject_configs = [
+        c for c in all_configs if c not in ("all", "auxiliary_train")
+    ]
 
     result = {}
-    for subject, texts in groups.items():
-        tokens = _tokenize_texts(tokenizer, texts)
-        result[subject] = tokens
+    total_questions = 0
+    for subject in subject_configs:
+        texts = []
+        # Each subject config has test, validation, dev splits
+        for split in ("test", "validation", "dev"):
+            try:
+                ds = load_dataset("cais/mmlu", subject, split=split)
+            except Exception:
+                continue
+            for row in ds:
+                choices = row.get("choices", [])
+                choices_fmt = "\n".join(
+                    f"  ({chr(65 + i)}) {c}" for i, c in enumerate(choices)
+                )
+                answer_idx = row.get("answer", 0)
+                answer_letter = chr(65 + answer_idx)
+                answer_text = answer_letter
+                if answer_idx < len(choices):
+                    answer_text = f"{answer_letter}: {choices[answer_idx]}"
+
+                text = f"Q: {row['question']}\n{choices_fmt}\nA: {answer_text}"
+                texts.append(text)
+
+        if texts:
+            total_questions += len(texts)
+            tokens = _tokenize_texts(tokenizer, texts)
+            result[subject] = tokens
 
     print(
-        f"    MMLU: {len(result)} subjects, "
+        f"    MMLU: {len(result)} subjects, {total_questions} questions, "
         f"{sum(len(t) for t in result.values()):,} tokens"
     )
     return result
@@ -639,12 +657,17 @@ def _load_logiqa_topics(tokenizer) -> Dict[str, Tensor]:
 
 
 def _load_commonsenseqa_topics(
-    tokenizer, min_examples: int = 5,
+    tokenizer, min_examples: int = 2,
 ) -> Dict[str, Tensor]:
     """
     Load CommonsenseQA, grouped by question_concept.
 
     Format: Q: {question}\n{choices}\nA: {answer}\n\n
+
+    Note: The train split has ~1,600+ unique question_concept values with
+    a long-tailed distribution (many concepts have only 1-5 examples).
+    min_examples=2 yields ~100+ topics; the previous default of 5 was too
+    aggressive, leaving only ~9 concepts above threshold.
     """
     from datasets import load_dataset
 
