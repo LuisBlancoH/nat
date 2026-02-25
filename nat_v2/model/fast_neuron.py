@@ -193,6 +193,11 @@ class FastNeuron(nn.Module):
         if self.mem_A is None:
             self.start_session(batch_size, device)
 
+        # Continuous state decay (every chunk, regardless of adapt mode)
+        self.mem_A = self.state_decay * self.mem_A
+        self.W_down_mod = self.state_decay * self.W_down_mod
+        self.W_up_mod = self.state_decay * self.W_up_mod
+
         # ================================================================
         # Step 1: OBSERVE
         # ================================================================
@@ -222,8 +227,7 @@ class FastNeuron(nn.Module):
             lr = self.lr_net(torch.cat([surprise, self.context], dim=-1))
             lr = torch.clamp(lr, max=0.1)                             # (batch, 1)
 
-            # Decay old state, then write new
-            self.mem_A = self.state_decay * self.mem_A + lr.unsqueeze(-1) * torch.bmm(
+            self.mem_A = self.mem_A + lr.unsqueeze(-1) * torch.bmm(
                 value.unsqueeze(2), key.unsqueeze(1)
             )                                                          # (batch, d_model, rank)
 
@@ -311,13 +315,12 @@ class FastNeuron(nn.Module):
             )
             proj_lr = torch.clamp(proj_lr, max=0.1)                   # (batch, 1)
 
-            # Decay old state, then write new (gated by soft threshold)
-            self.W_down_mod = self.state_decay * self.W_down_mod + (
+            self.W_down_mod = self.W_down_mod + (
                 write_strength.unsqueeze(-1) * proj_lr.unsqueeze(-1)
                 * torch.bmm(d_pat.unsqueeze(2), d_addr.unsqueeze(1))
             )                                                          # (batch, d_model, d_proj)
 
-            self.W_up_mod = self.state_decay * self.W_up_mod + (
+            self.W_up_mod = self.W_up_mod + (
                 write_strength.unsqueeze(-1) * proj_lr.unsqueeze(-1)
                 * torch.bmm(u_pat.unsqueeze(2), u_addr.unsqueeze(1))
             )                                                          # (batch, d_proj, d_model)
