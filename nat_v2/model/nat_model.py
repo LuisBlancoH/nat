@@ -41,7 +41,7 @@ class NATv2Model(nn.Module):
             self.base_model = base_model
         else:
             self.base_model = AutoModelForCausalLM.from_pretrained(
-                model_name, torch_dtype=dtype,
+                model_name, dtype=dtype,
             )
         self.base_model.eval()
         for p in self.base_model.parameters():
