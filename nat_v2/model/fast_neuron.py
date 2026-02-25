@@ -320,6 +320,19 @@ class FastNeuron(nn.Module):
                 * torch.bmm(u_pat.unsqueeze(2), u_addr.unsqueeze(1))
             )                                                          # (batch, d_proj, d_model)
 
+            # Norm clamp W_mod for stability (same as mem_A)
+            for W_mod, attr in [
+                (self.W_down_mod, "W_down_mod"),
+                (self.W_up_mod, "W_up_mod"),
+            ]:
+                norm = torch.norm(W_mod, dim=(1, 2), keepdim=True)
+                clamped = W_mod * torch.where(
+                    norm > self.max_norm,
+                    self.max_norm / (norm + 1e-8),
+                    torch.ones_like(norm),
+                )
+                setattr(self, attr, clamped)
+
         # ================================================================
         # Step 6: GATE AND INJECT
         # ================================================================
