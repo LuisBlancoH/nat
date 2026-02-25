@@ -298,37 +298,34 @@ def _load_deepmind_math_topics(
     """
     from datasets import load_dataset
 
-    splits = ["train-easy", "train-medium", "train-hard"]
-    print(f"    DeepMind Math (parquet): {len(splits)} splits")
+    print(f"    DeepMind Math (parquet): loading train split")
 
     result = {}
-    for split_name in splits:
-        try:
-            ds = load_dataset(
-                "midwestern-simulation/that-one-google-math-dataset",
-                split=split_name,
-            )
-            if len(ds) > max_per_split:
-                ds = ds.shuffle(seed=42).select(range(max_per_split))
+    try:
+        ds = load_dataset(
+            "midwestern-simulation/that-one-google-math-dataset",
+            split="train",
+        )
+        if len(ds) > max_per_split * 3:
+            ds = ds.shuffle(seed=42).select(range(max_per_split * 3))
 
-            texts = [f"Q: {row['q']}\nA: {row['a']}" for row in ds]
+        texts = [f"Q: {row['q']}\nA: {row['a']}" for row in ds]
 
-            # Chunk into sub-topics for diversity
-            for i in range(0, len(texts), chunk_size):
-                chunk = texts[i : i + chunk_size]
-                if len(chunk) < chunk_size // 2:
-                    break  # skip small trailing chunk
-                topic_key = f"{split_name}_{i // chunk_size:03d}"
-                tokens = _tokenize_texts(tokenizer, chunk)
-                result[topic_key] = tokens
+        # Chunk into sub-topics for diversity
+        for i in range(0, len(texts), chunk_size):
+            chunk = texts[i : i + chunk_size]
+            if len(chunk) < chunk_size // 2:
+                break
+            topic_key = f"dm_math_{i // chunk_size:03d}"
+            tokens = _tokenize_texts(tokenizer, chunk)
+            result[topic_key] = tokens
 
-            print(
-                f"    {split_name}: {len(texts)} examples → "
-                f"{sum(1 for k in result if k.startswith(split_name))} sub-topics"
-            )
-        except Exception as e:
-            print(f"    Skipping {split_name}: {e}")
-            continue
+        print(
+            f"    DeepMind Math: {len(texts)} examples → "
+            f"{len(result)} sub-topics"
+        )
+    except Exception as e:
+        print(f"    Failed to load DeepMind Math: {e}")
 
     return result
 
