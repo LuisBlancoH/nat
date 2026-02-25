@@ -32,7 +32,7 @@ class FastNeuron(nn.Module):
         d_context: int = 128,
         d_report: int = 128,
         d_hidden: int = 384,
-        max_norm: float = 10.0,
+        max_norm: float = 30.0,
     ):
         super().__init__()
         self.d_model = d_model
