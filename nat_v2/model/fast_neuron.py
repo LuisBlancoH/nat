@@ -101,7 +101,7 @@ class FastNeuron(nn.Module):
             nn.Linear(d_context, 1),
             nn.Sigmoid(),
         )
-        self.fixed_threshold: float | None = 0.5
+        self.fixed_threshold: float | None = 0.1
         proj_write_in = d_model + 1 + d_model + d_context
         self.proj_write_down_net = nn.Sequential(
             nn.Linear(proj_write_in, d_hidden),
