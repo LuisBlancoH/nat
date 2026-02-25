@@ -108,7 +108,6 @@ def test_gradient_flow():
     # Every network in the pipeline should receive gradients, except
     # threshold_net (fixed threshold bypasses it).
     critical_prefixes = [
-        "state_predictor",
         "surprise_net",
         "write_key_net",
         "write_value_net",

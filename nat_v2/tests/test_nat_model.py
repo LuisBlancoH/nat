@@ -241,7 +241,6 @@ def test_gradient_flow():
     # report_net doesn't affect logits (feeds slow neuron, inactive in Phase 1).
     # It gets gradients in Phase 2 when slow neuron context feeds back to loss.
     critical_prefixes = [
-        "state_predictor",
         "surprise_net",
         "write_key_net",
         "write_value_net",

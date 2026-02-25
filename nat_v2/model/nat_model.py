@@ -247,7 +247,7 @@ class NATv2Model(nn.Module):
         """
         Save all per-user state for deployment continuity.
 
-        Saves: fast neuron state (mem_A, W_mod, prev_h_avg, context),
+        Saves: fast neuron state (mem_A, W_mod, prev_h_avg, prev_mem_read, context),
         slow neuron state, report buffer, chunk counter.
         """
         state = {}
@@ -261,6 +261,7 @@ class NATv2Model(nn.Module):
                 "W_down_mod": neuron.W_down_mod,
                 "W_up_mod": neuron.W_up_mod,
                 "prev_h_avg": neuron.prev_h_avg,
+                "prev_mem_read": neuron.prev_mem_read,
                 "context": neuron.context,
             }
 
@@ -284,8 +285,8 @@ class NATv2Model(nn.Module):
             ("fast_A", self.fast_neuron_A),
             ("fast_B", self.fast_neuron_B),
         ]:
-            for attr in ["mem_A", "W_down_mod", "W_up_mod", "prev_h_avg", "context"]:
-                setattr(neuron, attr, state[name][attr])
+            for attr in ["mem_A", "W_down_mod", "W_up_mod", "prev_h_avg", "prev_mem_read", "context"]:
+                setattr(neuron, attr, state[name].get(attr, None))
 
         slow_s = state["slow"]
         for attr in ["mem_A", "W_down_mod", "W_up_mod", "prev_h_avg"]:

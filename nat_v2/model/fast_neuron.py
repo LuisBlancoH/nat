@@ -2,7 +2,7 @@
 FastNeuron — adaptive memory neuron for NAT v2.
 
 Hooks into a frozen base model layer and runs a 7-step pipeline each chunk:
-  1. Observe    — predict hidden state, compute surprise
+  1. Observe    — memory-based surprise (h_avg vs prev mem_read)
   2. Write      — outer-product write to associative memory
   3. Read       — attention-based memory recall
   4. Project    — bottleneck projection with residual
@@ -48,12 +48,9 @@ class FastNeuron(nn.Module):
         self.state_decay = state_decay
 
         # ---- Step 1: OBSERVE ----
-        # state_predictor: (d_model + d_context) -> d_hidden -> d_model
-        self.state_predictor = nn.Sequential(
-            nn.Linear(d_model + d_context, d_hidden),
-            nn.GELU(),
-            nn.Linear(d_hidden, d_model),
-        )
+        # Memory-based surprise: error = h_avg - prev_mem_read
+        # Measures memory adequacy — large when current input isn't captured by memory.
+        # Self-regulating: as memory improves, error shrinks naturally.
         # surprise_net: (d_model + d_context) -> d_hidden -> 1 -> sigmoid
         self.surprise_net = nn.Sequential(
             nn.Linear(d_model + d_context, d_hidden),
@@ -148,6 +145,7 @@ class FastNeuron(nn.Module):
         self.W_down_mod = None
         self.W_up_mod = None
         self.prev_h_avg = None
+        self.prev_mem_read = None   # previous chunk's memory read (for surprise signal)
         self.context = None
         self.last_report = None
         self.adapt_mode = True
@@ -164,12 +162,14 @@ class FastNeuron(nn.Module):
         self.W_down_mod = torch.zeros(batch_size, self.d_model, self.d_proj, device=device)
         self.W_up_mod = torch.zeros(batch_size, self.d_proj, self.d_model, device=device)
         self.prev_h_avg = None
+        self.prev_mem_read = None
         self.context = torch.zeros(batch_size, self.d_context, device=device)
 
     def start_window(self, batch_size: int, device: torch.device):
         """Reset memory for new window. W_mod and context persist (Phase 2)."""
         self.mem_A = torch.zeros(batch_size, self.d_model, self.rank, device=device)
         self.prev_h_avg = None
+        self.prev_mem_read = None
         # W_down_mod, W_up_mod, context NOT reset
 
     def detach_state(self):
@@ -209,15 +209,14 @@ class FastNeuron(nn.Module):
             self.start_session(batch_size, device)
 
         # ================================================================
-        # Step 1: OBSERVE
+        # Step 1: OBSERVE — memory-based surprise
         # ================================================================
         h_avg = h.mean(dim=1)                                          # (batch, d_model)
 
-        prev = torch.zeros_like(h_avg) if self.prev_h_avg is None else self.prev_h_avg
-        predicted_h = self.state_predictor(
-            torch.cat([prev, self.context], dim=-1)
-        )                                                              # (batch, d_model)
-        error = h_avg - predicted_h                                    # (batch, d_model)
+        # Memory adequacy error: how well does previous mem_read predict current input?
+        # Large error = novel content not yet captured by memory.
+        prev_read = torch.zeros_like(h_avg) if self.prev_mem_read is None else self.prev_mem_read
+        error = h_avg - prev_read                                      # (batch, d_model)
         surprise = self.surprise_net(
             torch.cat([error, self.context], dim=-1)
         )                                                              # (batch, 1)
@@ -259,6 +258,7 @@ class FastNeuron(nn.Module):
                 batch_size, self.d_report, device=device
             )
             self.last_gate = torch.zeros(batch_size, 1, device=device)
+            self.prev_mem_read = torch.zeros(batch_size, self.d_model, device=device)
             return h
 
         # ================================================================
@@ -365,5 +365,8 @@ class FastNeuron(nn.Module):
         self.last_report = self.report_net(
             torch.cat([error, surprise, down, g], dim=-1)
         )                                                              # (batch, d_report)
+
+        # Save mem_read for next chunk's surprise signal (detached — not in gradient chain)
+        self.prev_mem_read = mem_read.detach()
 
         return h_new
