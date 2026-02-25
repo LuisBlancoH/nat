@@ -233,10 +233,11 @@ def run_episode(
         ).item()
 
     # Fast neuron W_mod norms (end of episode)
-    metrics["W_mod_norm_A"] = (
-        torch.norm(model.fast_neuron_A.W_down_mod).item()
-        + torch.norm(model.fast_neuron_A.W_up_mod).item()
-    )
+    if model.enable_neuron_A and model.fast_neuron_A.W_down_mod is not None:
+        metrics["W_mod_norm_A"] = (
+            torch.norm(model.fast_neuron_A.W_down_mod).item()
+            + torch.norm(model.fast_neuron_A.W_up_mod).item()
+        )
     metrics["W_mod_norm_B"] = (
         torch.norm(model.fast_neuron_B.W_down_mod).item()
         + torch.norm(model.fast_neuron_B.W_up_mod).item()
@@ -472,7 +473,7 @@ def train_phase2(
                 "train/slow_lr": optimizer.param_groups[0]["lr"],
                 "train/fast_lr": optimizer.param_groups[1]["lr"],
                 "train/episode": episode,
-                "fast/W_mod_norm_A": metrics["W_mod_norm_A"],
+                "fast/W_mod_norm_A": metrics.get("W_mod_norm_A", 0.0),
                 "fast/W_mod_norm_B": metrics["W_mod_norm_B"],
             }
             if "slow_context_norm" in metrics:
@@ -498,7 +499,7 @@ def train_phase2(
                 "forgetting_ratio": metrics["forgetting_ratio"],
                 "consolidation_benefit": metrics["consolidation_benefit"],
                 "grad_norm": grad_norm_val,
-                "W_mod_norm_A": metrics["W_mod_norm_A"],
+                "W_mod_norm_A": metrics.get("W_mod_norm_A", 0.0),
                 "W_mod_norm_B": metrics["W_mod_norm_B"],
                 "per_window_losses": metrics["per_window_losses"],
                 "eps_per_sec": eps_per_sec,

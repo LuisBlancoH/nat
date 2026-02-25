@@ -431,15 +431,17 @@ def train_phase1(
                     else:
                         proj_write_sum_B += val
 
-            if adapt and model.fast_neuron_A.last_threshold is not None:
+            if adapt and model.fast_neuron_B.last_threshold is not None:
                 threshold_count += 1
 
             # Snapshot mem_A for per-chunk gradient logging
             if adapt and chunk_idx > 0:
-                model.fast_neuron_A.mem_A.retain_grad()
+                if model.enable_neuron_A and model.fast_neuron_A.mem_A is not None:
+                    model.fast_neuron_A.mem_A.retain_grad()
                 model.fast_neuron_B.mem_A.retain_grad()
+                mem_A = model.fast_neuron_A.mem_A if model.enable_neuron_A else None
                 mem_snapshots.append(
-                    (chunk_idx, model.fast_neuron_A.mem_A, model.fast_neuron_B.mem_A)
+                    (chunk_idx, mem_A, model.fast_neuron_B.mem_A)
                 )
 
             # Free adapt chunk graph (state tensors retain theirs)
@@ -455,8 +457,8 @@ def train_phase1(
         chunk_grad_norms = {}
         chunk_grad_norms["train/grad_norm_chunk_0"] = 0.0
         for ci, mem_A, mem_B in mem_snapshots:
-            gn_A = torch.norm(mem_A.grad).item() if mem_A.grad is not None else 0.0
-            gn_B = torch.norm(mem_B.grad).item() if mem_B.grad is not None else 0.0
+            gn_A = torch.norm(mem_A.grad).item() if mem_A is not None and mem_A.grad is not None else 0.0
+            gn_B = torch.norm(mem_B.grad).item() if mem_B is not None and mem_B.grad is not None else 0.0
             chunk_grad_norms[f"train/grad_norm_chunk_{ci}"] = gn_A + gn_B
         del mem_snapshots
 
@@ -498,21 +500,10 @@ def train_phase1(
                 "train/eval_loss": eval_loss_val,
                 "train/adapt_loss": adapt_loss,
                 "train/adaptation_benefit": adaptation_benefit,
-                "train/surprise_mean_A": surprise_sum_A / chunk_count,
                 "train/surprise_mean_B": surprise_sum_B / chunk_count,
-                "train/gate_mean_A": gate_sum_A / chunk_count,
                 "train/gate_mean_B": gate_sum_B / chunk_count,
-                "train/mem_norm_A": torch.norm(
-                    model.fast_neuron_A.mem_A
-                ).item(),
                 "train/mem_norm_B": torch.norm(
                     model.fast_neuron_B.mem_A
-                ).item(),
-                "train/W_down_mod_norm_A": torch.norm(
-                    model.fast_neuron_A.W_down_mod
-                ).item(),
-                "train/W_up_mod_norm_A": torch.norm(
-                    model.fast_neuron_A.W_up_mod
                 ).item(),
                 "train/W_down_mod_norm_B": torch.norm(
                     model.fast_neuron_B.W_down_mod
@@ -520,14 +511,28 @@ def train_phase1(
                 "train/W_up_mod_norm_B": torch.norm(
                     model.fast_neuron_B.W_up_mod
                 ).item(),
-                "train/threshold_mean_A": threshold_sum_A / t_count,
                 "train/threshold_mean_B": threshold_sum_B / t_count,
-                "train/proj_write_count_A": proj_write_sum_A,
                 "train/proj_write_count_B": proj_write_sum_B,
                 "train/grad_norm": grad_norm_val,
                 "train/lr": optimizer.param_groups[0]["lr"],
                 "train/episode": episode,
             }
+            if model.enable_neuron_A:
+                wandb_metrics.update({
+                    "train/surprise_mean_A": surprise_sum_A / chunk_count,
+                    "train/gate_mean_A": gate_sum_A / chunk_count,
+                    "train/mem_norm_A": torch.norm(
+                        model.fast_neuron_A.mem_A
+                    ).item(),
+                    "train/W_down_mod_norm_A": torch.norm(
+                        model.fast_neuron_A.W_down_mod
+                    ).item(),
+                    "train/W_up_mod_norm_A": torch.norm(
+                        model.fast_neuron_A.W_up_mod
+                    ).item(),
+                    "train/threshold_mean_A": threshold_sum_A / t_count,
+                    "train/proj_write_count_A": proj_write_sum_A,
+                })
             wandb_metrics.update(chunk_grad_norms)
             wandb.log(wandb_metrics, step=episode)
 
@@ -548,9 +553,6 @@ def train_phase1(
                     if torch.is_tensor(grad_norm)
                     else grad_norm
                 ),
-                "mem_A_norm_A": torch.norm(
-                    model.fast_neuron_A.mem_A
-                ).item(),
                 "mem_A_norm_B": torch.norm(
                     model.fast_neuron_B.mem_A
                 ).item(),
@@ -558,6 +560,10 @@ def train_phase1(
                 "eps_per_sec": eps_per_sec,
                 "elapsed_min": elapsed / 60,
             }
+            if model.enable_neuron_A:
+                metrics["mem_A_norm_A"] = torch.norm(
+                    model.fast_neuron_A.mem_A
+                ).item()
 
             log_file.write(json.dumps(metrics) + "\n")
             log_file.flush()

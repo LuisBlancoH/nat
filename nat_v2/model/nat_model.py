@@ -33,6 +33,7 @@ class NATv2Model(nn.Module):
         slow_fire_interval: int = 16,
         dtype: torch.dtype = torch.bfloat16,
         base_model: Optional[nn.Module] = None,
+        enable_neuron_A: bool = False,
     ):
         super().__init__()
 
@@ -54,6 +55,7 @@ class NATv2Model(nn.Module):
         self.layer_A = layer_A
         self.layer_B = layer_B
         self.slow_fire_interval = slow_fire_interval
+        self.enable_neuron_A = enable_neuron_A
 
         # ---- Read d_model from base model config ----
         d_model = self.base_model.config.hidden_size
@@ -61,10 +63,17 @@ class NATv2Model(nn.Module):
         # ---- Create neurons (fp32 parameters for training precision) ----
         self.fast_neuron_A = FastNeuron(d_model=d_model)
         self.fast_neuron_B = FastNeuron(d_model=d_model)
+        num_fast = 2 if enable_neuron_A else 1
         self.slow_neuron = SlowNeuron(
             fast_d_model=d_model,
             fast_d_proj=self.fast_neuron_A.d_proj,
+            num_fast_neurons=num_fast,
         )
+
+        # Freeze neuron A params when disabled (saves memory in optimizer)
+        if not enable_neuron_A:
+            for p in self.fast_neuron_A.parameters():
+                p.requires_grad = False
 
         # ---- Hook management ----
         self._hook_handles = []
@@ -97,11 +106,12 @@ class NATv2Model(nn.Module):
         if self._hook_handles:
             return  # already registered
         layers = self.base_model.model.layers
-        self._hook_handles.append(
-            layers[self.layer_A].register_forward_hook(
-                self._make_hook(self.fast_neuron_A)
+        if self.enable_neuron_A:
+            self._hook_handles.append(
+                layers[self.layer_A].register_forward_hook(
+                    self._make_hook(self.fast_neuron_A)
+                )
             )
-        )
         self._hook_handles.append(
             layers[self.layer_B].register_forward_hook(
                 self._make_hook(self.fast_neuron_B)
@@ -137,9 +147,10 @@ class NATv2Model(nn.Module):
         Returns:
             outputs: CausalLMOutput from the base model
         """
-        self.fast_neuron_A.adapt_mode = adapt
+        if self.enable_neuron_A:
+            self.fast_neuron_A.adapt_mode = adapt
+            self.fast_neuron_A.chunk_idx = chunk_idx
         self.fast_neuron_B.adapt_mode = adapt
-        self.fast_neuron_A.chunk_idx = chunk_idx
         self.fast_neuron_B.chunk_idx = chunk_idx
 
         outputs = self.base_model(
@@ -149,10 +160,16 @@ class NATv2Model(nn.Module):
         )
 
         # Collect reports for slow neuron
-        report_A = self.fast_neuron_A.last_report
         report_B = self.fast_neuron_B.last_report
-        if report_A is not None and report_B is not None:
-            combined = torch.cat([report_A, report_B], dim=-1)
+        if self.enable_neuron_A:
+            report_A = self.fast_neuron_A.last_report
+            if report_A is not None and report_B is not None:
+                combined = torch.cat([report_A, report_B], dim=-1)
+                self.slow_neuron.accumulate_report(combined)
+        elif report_B is not None:
+            # Pad with zeros in place of neuron A's report
+            zeros_A = torch.zeros_like(report_B)
+            combined = torch.cat([zeros_A, report_B], dim=-1)
             self.slow_neuron.accumulate_report(combined)
 
         # Slow neuron firing
@@ -162,10 +179,10 @@ class NATv2Model(nn.Module):
             and self.chunk_counter % self.slow_fire_interval == 0
             and len(self.slow_neuron.report_buffer) > 0
         ):
-            new_context = self.slow_neuron.fire(
-                [self.fast_neuron_A, self.fast_neuron_B]
-            )
-            self.fast_neuron_A.context = new_context
+            fast_neurons = [self.fast_neuron_A, self.fast_neuron_B] if self.enable_neuron_A else [self.fast_neuron_B]
+            new_context = self.slow_neuron.fire(fast_neurons)
+            if self.enable_neuron_A:
+                self.fast_neuron_A.context = new_context
             self.fast_neuron_B.context = new_context
 
         return outputs
@@ -193,13 +210,15 @@ class NATv2Model(nn.Module):
 
     def start_window(self, batch_size: int, device: torch.device):
         """Reset fast neuron memory for new window. W_mod, slow neuron, context persist."""
-        self.fast_neuron_A.start_window(batch_size, device)
+        if self.enable_neuron_A:
+            self.fast_neuron_A.start_window(batch_size, device)
         self.fast_neuron_B.start_window(batch_size, device)
         # chunk_counter NOT reset — cumulative for slow neuron firing
 
     def detach_all_state(self):
         """Detach all persistent state (Phase 2 window boundary)."""
-        self.fast_neuron_A.detach_state()
+        if self.enable_neuron_A:
+            self.fast_neuron_A.detach_state()
         self.fast_neuron_B.detach_state()
         self.slow_neuron.detach_state()
 
@@ -210,7 +229,8 @@ class NATv2Model(nn.Module):
         Slow neuron state persists (it accumulates across sessions).
         Used between windows in Phase 2.
         """
-        self.fast_neuron_A.start_session(batch_size, device)
+        if self.enable_neuron_A:
+            self.fast_neuron_A.start_session(batch_size, device)
         self.fast_neuron_B.start_session(batch_size, device)
         self.chunk_counter = 0
 

@@ -148,7 +148,6 @@ def test_slow_neuron_fires():
     model.slow_neuron_active = True
 
     # Force low threshold so writes happen
-    model.fast_neuron_A.fixed_threshold = 0.0
     model.fast_neuron_B.fixed_threshold = 0.0
 
     fire_counts = []
@@ -163,10 +162,10 @@ def test_slow_neuron_fires():
             end = start + CHUNK_SIZE
             chunk_ids = input_ids[:, start:end]
 
-            old_context = model.fast_neuron_A.context.clone()
+            old_context = model.fast_neuron_B.context.clone()
             with torch.no_grad():
                 model(chunk_ids, adapt=True, chunk_idx=chunk_idx)
-            new_context = model.fast_neuron_A.context
+            new_context = model.fast_neuron_B.context
 
             # Check if context changed (slow neuron fired)
             if not torch.equal(old_context, new_context):
@@ -190,7 +189,6 @@ def test_w_mod_persists_across_windows():
     model = make_model()
     model.start_episode(BATCH, "cpu")
     model.slow_neuron_active = True
-    model.fast_neuron_A.fixed_threshold = 0.0
     model.fast_neuron_B.fixed_threshold = 0.0
 
     input_ids = torch.randint(0, TINY_VOCAB, (BATCH, WINDOW_LEN))
@@ -203,13 +201,13 @@ def test_w_mod_persists_across_windows():
         with torch.no_grad():
             model(chunk_ids, adapt=(chunk_idx < NUM_ADAPT), chunk_idx=chunk_idx)
 
-    w_mod_after_w1 = torch.norm(model.fast_neuron_A.W_down_mod).item()
+    w_mod_after_w1 = torch.norm(model.fast_neuron_B.W_down_mod).item()
 
     # start_window resets mem_A but NOT W_mod
     model.start_window(BATCH, "cpu")
 
-    w_mod_after_reset = torch.norm(model.fast_neuron_A.W_down_mod).item()
-    mem_after_reset = torch.norm(model.fast_neuron_A.mem_A).item()
+    w_mod_after_reset = torch.norm(model.fast_neuron_B.W_down_mod).item()
+    mem_after_reset = torch.norm(model.fast_neuron_B.mem_A).item()
 
     assert mem_after_reset == 0.0, f"mem_A should be zero after start_window"
     assert w_mod_after_reset == w_mod_after_w1, (
@@ -231,7 +229,6 @@ def test_consolidation_writes():
     model = make_model(slow_fire_interval=4)
     model.start_episode(BATCH, "cpu")
     model.slow_neuron_active = True
-    model.fast_neuron_A.fixed_threshold = 0.0
     model.fast_neuron_B.fixed_threshold = 0.0
 
     input_ids = torch.randint(0, TINY_VOCAB, (BATCH, WINDOW_LEN))
@@ -244,15 +241,15 @@ def test_consolidation_writes():
         end = start + CHUNK_SIZE
         chunk_ids = input_ids[:, start:end]
 
-        w_mod_before = torch.norm(model.fast_neuron_A.W_down_mod).item()
+        w_mod_before = torch.norm(model.fast_neuron_B.W_down_mod).item()
         with torch.no_grad():
             model(chunk_ids, adapt=True, chunk_idx=chunk_idx)
-        w_mod_after = torch.norm(model.fast_neuron_A.W_down_mod).item()
+        w_mod_after = torch.norm(model.fast_neuron_B.W_down_mod).item()
         w_mod_norms.append((w_mod_before, w_mod_after))
 
     # At least some W_mod changes should come from consolidation
     # (slow neuron fires at chunk 4 with fire_interval=4)
-    final_w_mod = torch.norm(model.fast_neuron_A.W_down_mod).item()
+    final_w_mod = torch.norm(model.fast_neuron_B.W_down_mod).item()
     assert final_w_mod > 0, f"W_mod should be non-zero after consolidation"
 
     print(
@@ -269,7 +266,6 @@ def test_gradient_flow_to_slow():
     model = make_model(slow_fire_interval=2)
     model.start_episode(BATCH, "cpu")
     model.slow_neuron_active = True
-    model.fast_neuron_A.fixed_threshold = 0.0
     model.fast_neuron_B.fixed_threshold = 0.0
 
     model.zero_grad()
@@ -322,7 +318,6 @@ def test_detach_between_windows():
     model = make_model()
     model.start_episode(BATCH, "cpu")
     model.slow_neuron_active = True
-    model.fast_neuron_A.fixed_threshold = 0.0
     model.fast_neuron_B.fixed_threshold = 0.0
 
     input_ids = torch.randint(0, TINY_VOCAB, (BATCH, WINDOW_LEN))
@@ -350,13 +345,13 @@ def test_detach_between_windows():
     model.detach_all_state()
 
     # Verify W_mod is detached
-    assert not model.fast_neuron_A.W_down_mod.requires_grad, (
+    assert not model.fast_neuron_B.W_down_mod.requires_grad, (
         "W_down_mod should not require grad after detach"
     )
-    assert not model.fast_neuron_A.W_up_mod.requires_grad, (
+    assert not model.fast_neuron_B.W_up_mod.requires_grad, (
         "W_up_mod should not require grad after detach"
     )
-    assert not model.fast_neuron_A.context.requires_grad, (
+    assert not model.fast_neuron_B.context.requires_grad, (
         "context should not require grad after detach"
     )
 

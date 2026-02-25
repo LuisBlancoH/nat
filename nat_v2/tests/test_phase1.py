@@ -354,7 +354,6 @@ def test_bptt_gradient_chain():
     model = make_model()
 
     # Force low thresholds so projection write paths are active
-    model.fast_neuron_A.fixed_threshold = 0.0
     model.fast_neuron_B.fixed_threshold = 0.0
 
     model.start_episode(BATCH, "cpu")
@@ -381,23 +380,20 @@ def test_bptt_gradient_chain():
     eval_loss = torch.stack(eval_losses).mean()
     eval_loss.backward()
 
-    # Check that BOTH fast neurons have gradients in their write networks
+    # Check that neuron B has gradients in write networks
     # (which only execute during adapt chunks). If BPTT works, eval loss
     # gradients flow back through state tensors to adapt chunk computations.
-    for neuron_name, neuron in [
-        ("fast_neuron_A", model.fast_neuron_A),
-        ("fast_neuron_B", model.fast_neuron_B),
-    ]:
-        write_grad = False
-        for name, p in neuron.named_parameters():
-            if name.startswith("write_key_net") or name.startswith(
-                "write_value_net"
-            ):
-                if p.grad is not None and p.grad.abs().sum() > 0:
-                    write_grad = True
-                    break
-        assert write_grad, \
-            f"{neuron_name}: write networks have no gradient (BPTT broken)"
+    neuron = model.fast_neuron_B
+    write_grad = False
+    for name, p in neuron.named_parameters():
+        if name.startswith("write_key_net") or name.startswith(
+            "write_value_net"
+        ):
+            if p.grad is not None and p.grad.abs().sum() > 0:
+                write_grad = True
+                break
+    assert write_grad, \
+        "fast_neuron_B: write networks have no gradient (BPTT broken)"
 
     print("PASS: Test 5 — BPTT gradient chain from eval loss to adapt chunks")
 

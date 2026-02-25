@@ -64,8 +64,9 @@ def make_input():
 def test_creation():
     model = make_model()
 
-    assert len(model._hook_handles) == 2, \
-        f"Expected 2 hooks, got {len(model._hook_handles)}"
+    expected_hooks = 1  # neuron A disabled by default
+    assert len(model._hook_handles) == expected_hooks, \
+        f"Expected {expected_hooks} hooks, got {len(model._hook_handles)}"
 
     # Base model frozen, neurons trainable
     base_trainable = sum(1 for p in model.base_model.parameters() if p.requires_grad)
@@ -73,7 +74,7 @@ def test_creation():
     assert base_trainable == 0, f"Base model should be frozen, {base_trainable} params trainable"
     assert theta_count > 0, "Should have trainable θ parameters"
 
-    print(f"PASS: Test 1 — Model created: {theta_count:,} θ params, 2 hooks")
+    print(f"PASS: Test 1 — Model created: {theta_count:,} θ params, {expected_hooks} hook(s)")
 
 
 # ── Test 7: Output shapes match base model ──────────────────────────
@@ -125,22 +126,18 @@ def test_mem_a_changes():
     model = make_model()
     model.start_episode(BATCH, "cpu")
 
-    norm_A_before = torch.norm(model.fast_neuron_A.mem_A).item()
     norm_B_before = torch.norm(model.fast_neuron_B.mem_A).item()
-    assert norm_A_before == 0.0 and norm_B_before == 0.0
+    assert norm_B_before == 0.0
 
     ids = make_input()
     with torch.no_grad():
         model(ids, adapt=True)
 
-    norm_A_after = torch.norm(model.fast_neuron_A.mem_A).item()
     norm_B_after = torch.norm(model.fast_neuron_B.mem_A).item()
-    assert norm_A_after > 0, f"fast_A mem_A should be nonzero after adapt, got {norm_A_after}"
     assert norm_B_after > 0, f"fast_B mem_A should be nonzero after adapt, got {norm_B_after}"
 
     print(
         f"PASS: Test 5 — mem_A changes: "
-        f"A={norm_A_before:.4f}→{norm_A_after:.4f}, "
         f"B={norm_B_before:.4f}→{norm_B_after:.4f}"
     )
 
@@ -151,18 +148,15 @@ def test_multi_chunk_adaptation():
     model = make_model()
     model.start_episode(BATCH, "cpu")
 
-    norms_A = []
     norms_B = []
     for i in range(NUM_CHUNKS):
         ids = make_input()
         adapt = i < NUM_ADAPT
         with torch.no_grad():
             out = model(ids, adapt=adapt)
-        norms_A.append(torch.norm(model.fast_neuron_A.mem_A).item())
         norms_B.append(torch.norm(model.fast_neuron_B.mem_A).item())
 
     # Memory should grow over adapt chunks
-    assert norms_A[-1] > norms_A[0], f"fast_A mem_A should grow: {norms_A}"
     assert norms_B[-1] > norms_B[0], f"fast_B mem_A should grow: {norms_B}"
 
     # Reports should have been collected
@@ -172,7 +166,6 @@ def test_multi_chunk_adaptation():
 
     print(
         f"PASS: Test 2 — 4-chunk adaptation: "
-        f"A_norms={[f'{n:.4f}' for n in norms_A]}, "
         f"B_norms={[f'{n:.4f}' for n in norms_B]}"
     )
 
@@ -224,7 +217,6 @@ def test_gradient_flow():
     model = make_model()
 
     # Force low thresholds so projection write paths are active
-    model.fast_neuron_A.fixed_threshold = 0.0
     model.fast_neuron_B.fixed_threshold = 0.0
 
     model.start_episode(BATCH, "cpu")
@@ -245,7 +237,7 @@ def test_gradient_flow():
     loss = F.cross_entropy(logits, targets)
     loss.backward()
 
-    # Check gradient flow to BOTH fast neurons
+    # Check gradient flow to neuron B (neuron A is disabled)
     # report_net doesn't affect logits (feeds slow neuron, inactive in Phase 1).
     # It gets gradients in Phase 2 when slow neuron context feeds back to loss.
     critical_prefixes = [
@@ -268,35 +260,32 @@ def test_gradient_flow():
         "slot_layer_norm",
     ]
 
-    for neuron_name, neuron in [
-        ("fast_neuron_A", model.fast_neuron_A),
-        ("fast_neuron_B", model.fast_neuron_B),
-    ]:
-        params_with_grad = []
-        params_no_grad = []
-        for name, p in neuron.named_parameters():
-            if p.grad is not None and p.grad.abs().sum() > 0:
-                params_with_grad.append(name)
-            else:
-                params_no_grad.append(name)
+    neuron = model.fast_neuron_B
+    params_with_grad = []
+    params_no_grad = []
+    for name, p in neuron.named_parameters():
+        if p.grad is not None and p.grad.abs().sum() > 0:
+            params_with_grad.append(name)
+        else:
+            params_no_grad.append(name)
 
-        missing = []
-        for prefix in critical_prefixes:
-            if not any(n.startswith(prefix) for n in params_with_grad):
-                missing.append(prefix)
+    missing = []
+    for prefix in critical_prefixes:
+        if not any(n.startswith(prefix) for n in params_with_grad):
+            missing.append(prefix)
 
-        assert not missing, \
-            f"{neuron_name}: no gradient for {missing}. " \
-            f"With grad: {params_with_grad}"
+    assert not missing, \
+        f"fast_neuron_B: no gradient for {missing}. " \
+        f"With grad: {params_with_grad}"
 
-        total = len(params_with_grad) + len(params_no_grad)
-        print(
-            f"  {neuron_name}: {len(params_with_grad)}/{total} params with grad"
-        )
-        if params_no_grad:
-            print(f"    (no grad: {params_no_grad})")
+    total = len(params_with_grad) + len(params_no_grad)
+    print(
+        f"  fast_neuron_B: {len(params_with_grad)}/{total} params with grad"
+    )
+    if params_no_grad:
+        print(f"    (no grad: {params_no_grad})")
 
-    print("PASS: Test 6 — Gradients flow to all θ networks in both neurons")
+    print("PASS: Test 6 — Gradients flow to all θ networks in neuron B")
 
 
 # ── Test: save/load state roundtrip ─────────────────────────────────
@@ -316,17 +305,17 @@ def test_save_load_state():
     model.save_state(path)
 
     # Record state before load
-    mem_A_before = model.fast_neuron_A.mem_A.clone()
+    mem_B_before = model.fast_neuron_B.mem_A.clone()
     counter_before = model.chunk_counter
 
     # Corrupt state
     model.start_episode(BATCH, "cpu")
-    assert torch.norm(model.fast_neuron_A.mem_A).item() == 0.0
+    assert torch.norm(model.fast_neuron_B.mem_A).item() == 0.0
 
     # Load
     model.load_state(path)
 
-    assert torch.equal(model.fast_neuron_A.mem_A, mem_A_before), \
+    assert torch.equal(model.fast_neuron_B.mem_A, mem_B_before), \
         "mem_A should match after load"
     assert model.chunk_counter == counter_before, \
         "chunk_counter should match after load"
@@ -339,7 +328,7 @@ def test_save_load_state():
 def test_hook_lifecycle():
     model = make_model()
 
-    assert len(model._hook_handles) == 2
+    assert len(model._hook_handles) == 1  # neuron A disabled
     model.remove_hooks()
     assert len(model._hook_handles) == 0
 
@@ -348,11 +337,11 @@ def test_hook_lifecycle():
     assert len(model._hook_handles) == 0
 
     model.register_hooks()
-    assert len(model._hook_handles) == 2
+    assert len(model._hook_handles) == 1
 
     # Double register doesn't add extra hooks
     model.register_hooks()
-    assert len(model._hook_handles) == 2
+    assert len(model._hook_handles) == 1
 
     print("PASS: Test — Hook lifecycle (remove/register idempotent)")
 
