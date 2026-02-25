@@ -37,6 +37,7 @@ class FastNeuron(nn.Module):
         d_context: int = 128,
         d_report: int = 128,
         d_hidden: int = 384,
+        w_mod_decay: float = 0.95,
     ):
         super().__init__()
         self.d_model = d_model
@@ -47,6 +48,7 @@ class FastNeuron(nn.Module):
         self.d_context = d_context
         self.d_report = d_report
         self.d_hidden = d_hidden
+        self.w_mod_decay = w_mod_decay
 
         # ---- Step 1: OBSERVE ----
         # Memory-based surprise: error = h_avg - prev_mem_read
@@ -319,12 +321,12 @@ class FastNeuron(nn.Module):
             )
             proj_lr = torch.clamp(proj_lr, max=0.1)                   # (batch, 1)
 
-            self.W_down_mod = self.W_down_mod + (
+            self.W_down_mod = self.w_mod_decay * self.W_down_mod + (
                 write_strength.unsqueeze(-1) * proj_lr.unsqueeze(-1)
                 * torch.bmm(d_pat.unsqueeze(2), d_addr.unsqueeze(1))
             )                                                          # (batch, d_model, d_proj)
 
-            self.W_up_mod = self.W_up_mod + (
+            self.W_up_mod = self.w_mod_decay * self.W_up_mod + (
                 write_strength.unsqueeze(-1) * proj_lr.unsqueeze(-1)
                 * torch.bmm(u_pat.unsqueeze(2), u_addr.unsqueeze(1))
             )                                                          # (batch, d_proj, d_model)
