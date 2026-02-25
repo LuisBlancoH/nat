@@ -251,6 +251,9 @@ class TestGradientFlow:
     def test_grad_flows_to_fast_B_init(self, layer, dummy_input):
         layer.train()
         layer.reset_fast_weights(BATCH)
+        # fast_B_init only enters the graph once fast_A is nonzero;
+        # run one adapt step first, then a read-only pass.
+        _ = layer(dummy_input, do_adapt=True)
         out = layer(dummy_input, do_adapt=False)
         loss = out.sum()
         loss.backward()
@@ -336,12 +339,18 @@ class TestStability:
 
 class TestGateInit:
     def test_initial_gate_not_zero(self, layer, dummy_input):
-        """Gate should be slightly open initially (bias = -1.0 → ~0.27)."""
-        out_read = layer.read(dummy_input)
-        # If gate were zero, output would equal h_t exactly (identity).
-        # Check that memory has some effect (small but non-zero).
-        diff = (out_read - dummy_input).abs().mean()
-        assert diff > 1e-8, "Gate appears to be stuck at 0"
+        """Gate opens after the first adaptation step."""
+        # Before adaptation, read() is identity (fast_A=0 short-circuit).
+        out_no_adapt = layer.read(dummy_input)
+        assert torch.allclose(out_no_adapt, dummy_input), (
+            "read() should be identity before any adaptation"
+        )
+
+        # After one adaptation step, memory is non-zero and gate should open.
+        _ = layer(dummy_input, do_adapt=True)
+        out_after = layer.read(dummy_input)
+        diff = (out_after - dummy_input).abs().mean()
+        assert diff > 1e-8, "Gate appears to be stuck at 0 after adaptation"
 
 
 # ============================================================

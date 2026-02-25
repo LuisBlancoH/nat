@@ -294,6 +294,14 @@ class AdaptiveMemoryLayer(nn.Module):
         assert self.fast_A is not None and self.fast_B is not None, (
             "read() called before reset_fast_weights()"
         )
+
+        # If fast_A is still zero (no adaptation has happened this session),
+        # return h_t unchanged. This ensures the pre-adaptation baseline is a
+        # true identity pass-through and the slow params cannot learn a static
+        # offset via the bias terms in read_net / gate_net.
+        if self.fast_A.abs().max() < 1e-9:
+            return h_t
+
         batch, seq_len, d_model = h_t.shape
 
         # Query fast weights: W @ h = (fast_A @ fast_B) @ h
